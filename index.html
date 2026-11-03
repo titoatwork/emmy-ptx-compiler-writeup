@@ -1,0 +1,2350 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>the compiler was correct. it was 43 times too slow.</title>
+<meta name="description" content="A worklog of a direct Kernel IR to PTX compiler: three invariants, a 43x index bug, shared-memory caches, warp reductions, the optimizations that survived, and the ones that did not.">
+<meta name="author" content="titoatwork">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fira+Mono:wght@400;500;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=Kalam:wght@300;400;700&display=swap" rel="stylesheet">
+<meta property="og:title" content="the compiler was correct. it was 43 times too slow.">
+<meta property="og:description" content="A worklog of a direct Kernel IR to PTX compiler: three invariants, a 43x index bug, shared-memory caches, warp reductions, the optimizations that survived, and the ones that did not.">
+<meta property="og:type" content="article">
+<meta property="article:published_time" content="2026-11-02">
+<meta property="article:author" content="titoatwork">
+<meta name="twitter:card" content="summary">
+<link rel="canonical" href="https://titoatwork.github.io/emmy-ptx-compiler-writeup/">
+<meta property="og:url" content="https://titoatwork.github.io/emmy-ptx-compiler-writeup/">
+<meta property="og:image" content="https://img.youtube.com/vi/LO_Msz4fN30/maxresdefault.jpg">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTIiIGZpbGw9IiMxMTExMTEiLz48dGV4dCB4PSIzMiIgeT0iNDUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMzgiIGZvbnQtd2VpZ2h0PSI3MDAiIGZpbGw9IiNlMDYwNTQiIHRleHQtYW5jaG9yPSJtaWRkbGUiPmU8L3RleHQ+PC9zdmc+">
+<!-- Set canonical_url and og_image in the frontmatter before publishing. -->
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem("theme");
+    if (!t) { t = "dark"; }
+    document.documentElement.dataset.theme = t;
+  } catch (e) {
+    document.documentElement.dataset.theme = "dark";
+  }
+})();
+</script>
+<style>:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111111;
+  --text: #f0e8d8;
+  --muted: #c7b8a3;
+  --accent: #e06054;
+  --accent-2: #9fc7ff;
+  --accent-soft: #2a1715;
+  --rule: #332c25;
+  --panel: #1e1a16;
+  --table-head: #241f1a;
+  --code-bg: #0e0c0a;
+  --code-text: #f0e8d8;
+  --code-muted: #8f8272;
+  --code-reg: #9fc7ff;
+  --serif: "Source Serif 4", "Iowan Old Style", Georgia, serif;
+  --mono: "Fira Mono", "Cascadia Mono", Consolas, monospace;
+  --sans: var(--mono);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f7f5ef;
+  --text: #1d1d1a;
+  --muted: #716f66;
+  --accent: #a93b2f;
+  --accent-2: #2b5f8a;
+  --accent-soft: #f3ddd8;
+  --rule: #d9d5ca;
+  --panel: #efede6;
+  --table-head: #e9e4d8;
+  --code-bg: #edebe4;
+  --code-text: #24241f;
+  --code-muted: #7c7a70;
+  --code-reg: #2b5f8a;
+}
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  position: relative;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--serif);
+  font-size: 18px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-optical-sizing: auto;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+::view-transition-old(root) { z-index: 1; }
+::view-transition-new(root) { z-index: 2; }
+
+a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+}
+
+a:hover { text-decoration-style: solid; }
+
+a:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+img,
+svg { max-width: 100%; }
+
+#progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 2px;
+  width: 0;
+  background: var(--accent);
+  z-index: 30;
+}
+
+.skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 50;
+  padding: 0.55rem 0.75rem;
+  background: var(--accent);
+  color: var(--bg);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  text-decoration: none;
+}
+
+.skip:focus {
+  left: 0.75rem;
+  top: 0.75rem;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--bg);
+  border-bottom: 1px solid var(--rule);
+}
+
+.topbar-inner {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 0.65rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.brand {
+  font-family: var(--serif);
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.brand:hover { text-decoration: underline; }
+
+.theme-toggle {
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  padding: 0 0 0.1rem;
+  cursor: pointer;
+}
+
+.theme-toggle:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.wrap {
+  position: relative;
+  z-index: 1;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
+.hero {
+  padding: 4.2rem 0 2.4rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.eyebrow {
+  margin: 0 0 0.85rem;
+  font-family: var(--serif);
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--accent);
+  text-transform: lowercase;
+}
+
+.hero h1 {
+  margin: 0;
+  max-width: 900px;
+  font-family: var(--serif);
+  font-size: clamp(2.5rem, 6vw, 4.5rem);
+  font-weight: 600;
+  line-height: 1.03;
+  letter-spacing: -0.03em;
+}
+
+.subtitle {
+  margin: 1rem 0 1.1rem;
+  max-width: 760px;
+  text-wrap: balance;
+  font-family: var(--serif);
+  font-size: clamp(1.02rem, 2vw, 1.2rem);
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.meta {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  color: var(--muted);
+  text-transform: lowercase;
+}
+
+.meta .sep { color: var(--rule); }
+
+.hero-note {
+  margin: 0.7rem 0 0;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.hero-links {
+  margin: 0.45rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.hero-links .sep { color: var(--rule); }
+.hero-links a { color: var(--accent); }
+
+.abstract {
+  max-width: 72ch;
+  margin: 2.2rem auto 0;
+  padding: 1.25rem 1.45rem;
+  background: var(--panel);
+  border-left: 3px solid var(--accent);
+}
+
+.abstract .label {
+  margin: 0 0 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--accent);
+  text-transform: lowercase;
+}
+
+.abstract p {
+  margin: 0 0 0.8rem;
+  font-family: var(--serif);
+  font-size: 1.01rem;
+  line-height: 1.7;
+}
+
+.abstract p:last-child { margin-bottom: 0; }
+.abstract .takeaway { font-weight: 600; }
+
+.toc {
+  max-width: 980px;
+  margin: 2.6rem auto;
+  padding: 1.1rem 0 1.2rem;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+}
+
+.toc .label {
+  margin: 0 0 0.55rem;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--muted);
+  text-transform: lowercase;
+}
+
+.toc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  gap: 0.15rem 1.6rem;
+}
+
+.toc a {
+  display: flex;
+  gap: 0.7rem;
+  padding: 0.32rem 0;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  line-height: 1.4;
+  color: var(--text);
+  text-decoration: none;
+  text-transform: lowercase;
+}
+
+.toc a:hover { color: var(--accent); }
+
+.toc-num {
+  min-width: 1.35rem;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--accent);
+}
+
+.article {
+  max-width: 1120px;
+  margin: 0 auto;
+}
+
+.article > p,
+.article > h2,
+.article > h3,
+.article > ul,
+.article > ol,
+.article > blockquote {
+  max-width: 72ch;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.article h2,
+.article h3,
+.appendix h2,
+.appendix h3 {
+  scroll-margin-top: 4.8rem;
+}
+
+.article h2,
+.appendix h2 {
+  margin: 3.2rem auto 1.1rem;
+  padding-top: 1.3rem;
+  border-top: 1px solid var(--rule);
+  font-family: var(--serif);
+  font-size: clamp(1.55rem, 3vw, 2.05rem);
+  font-weight: 600;
+  line-height: 1.16;
+  letter-spacing: -0.015em;
+  text-transform: lowercase;
+}
+
+.article h2 { max-width: 72ch; }
+
+.article h3,
+.appendix h3 {
+  margin: 2rem auto 0.7rem;
+  font-family: var(--serif);
+  font-size: 1.22rem;
+  font-weight: 600;
+  line-height: 1.3;
+  text-transform: lowercase;
+}
+
+.article h3 { max-width: 72ch; }
+
+.article p,
+.appendix p {
+  margin: 0 auto 1.1rem;
+  max-width: 72ch;
+  font-family: var(--serif);
+  font-size: 1.05rem;
+  line-height: 1.78;
+}
+
+.article p.lede {
+  font-size: clamp(1.22rem, 2.4vw, 1.42rem);
+  line-height: 1.6;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.article ul,
+.article ol,
+.appendix ul,
+.appendix ol {
+  max-width: 72ch;
+  margin: 0 auto 1.2rem;
+  padding-left: 1.3rem;
+  font-family: var(--serif);
+  font-size: 1.04rem;
+  line-height: 1.72;
+}
+
+.article li,
+.appendix li { margin-bottom: 0.45rem; }
+
+.article strong,
+.appendix strong { font-weight: 600; }
+
+code {
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 0.84em;
+  color: var(--accent-2);
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  padding: 0.04em 0.28em;
+}
+
+pre {
+  max-width: 100%;
+  margin: 1.4rem auto;
+  padding: 1rem 1.15rem;
+  overflow-x: auto;
+  background: var(--code-bg);
+  color: var(--code-text);
+  border: 1px solid var(--rule);
+  font-size: 0.84rem;
+  line-height: 1.6;
+  tab-size: 2;
+}
+
+pre code {
+  display: block;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+pre[data-lang="ptx"],
+pre[data-lang="python"],
+pre[data-lang="bash"] {
+  position: relative;
+  padding-top: 1.7rem;
+}
+
+pre[data-lang="ptx"]::before,
+pre[data-lang="python"]::before,
+pre[data-lang="bash"]::before {
+  position: absolute;
+  top: 0.55rem;
+  right: 0.8rem;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--code-muted);
+}
+
+pre[data-lang="ptx"]::before { content: "ptx"; }
+pre[data-lang="python"]::before { content: "python"; }
+pre[data-lang="bash"]::before { content: "shell"; }
+pre[data-lang="text"]::before { display: none; }
+
+.table-wrap {
+  max-width: 100%;
+  margin: 1.6rem auto 1.4rem;
+  overflow-x: auto;
+  border: 1px solid var(--rule);
+  background: var(--panel);
+}
+
+table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 0.86rem;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
+th,
+td {
+  padding: 0.56rem 0.68rem;
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  background: var(--table-head);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 400;
+  color: var(--muted);
+  border-bottom-color: var(--text);
+  text-transform: lowercase;
+}
+
+tbody tr:last-child td { border-bottom: 0; }
+
+tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--table-head) 55%, transparent);
+}
+
+table.benchmark th:nth-child(2),
+table.benchmark th:nth-child(3),
+table.benchmark td:nth-child(2),
+table.benchmark td:nth-child(3) {
+  text-align: right;
+  white-space: nowrap;
+}
+
+td.note {
+  font-family: var(--serif);
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+table.file-refs { min-width: 520px; }
+table.file-refs td:first-child { width: 34%; }
+table.file-refs td code { overflow-wrap: anywhere; }
+
+.table-caption {
+  max-width: 72ch;
+  margin: 0.55rem auto 0;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.55;
+  color: var(--muted);
+  text-transform: lowercase;
+}
+
+.diagram {
+  max-width: 100%;
+  margin: 2.2rem auto;
+}
+
+.diagram-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.diagram pre {
+  margin: 0;
+  padding: 1rem 1.15rem;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--accent);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.diagram pre code {
+  display: block;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+.diagram.pipeline .diagram-scroll { overflow-x: auto; }
+
+.pipeline-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-width: 980px;
+}
+
+.pipeline-svg .box rect {
+  fill: var(--panel);
+  stroke: var(--rule);
+  stroke-width: 1.2;
+}
+
+.pipeline-svg .box.accent rect,
+.pipeline-svg .box.output rect {
+  fill: var(--accent-soft);
+  stroke: var(--accent);
+}
+
+.pipeline-svg .box-title {
+  fill: var(--text);
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.pipeline-svg .box-sub {
+  fill: var(--muted);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.pipeline-svg .arrow {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.4;
+}
+
+.pipeline-svg .arrowhead { fill: var(--muted); }
+
+.pipeline-svg .note {
+  fill: var(--muted);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+figcaption {
+  max-width: 72ch;
+  margin: 0.7rem auto 0;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.55;
+  color: var(--muted);
+  text-transform: lowercase;
+}
+
+.sketch {
+  max-width: 100%;
+  margin: 2.4rem auto;
+}
+
+.sketch .paper {
+  padding: 1.1rem;
+  background: #fcfaf4;
+  border: 1px solid #e5e0d5;
+  border-radius: 8px;
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.16);
+  overflow-x: auto;
+}
+
+.sketch svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-width: 820px;
+}
+
+.sketch svg text {
+  font-family: "Kalam", "Comic Sans MS", cursive;
+  text-transform: none;
+}
+
+.sketch svg .mono {
+  font-family: "Fira Mono", "Cascadia Mono", Consolas, monospace;
+}
+
+.sketch svg .ink { color: #2a261f; }
+.sketch svg .accent { color: #a93b2f; }
+.sketch svg .blue { color: #2b5f8a; }
+.sketch svg .muted { color: #7a7366; }
+.sketch svg .red { color: #c0392b; }
+
+.sr-only,
+.article p.sr-only,
+.appendix p.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.appendix {
+  max-width: 1120px;
+  margin: 0 auto;
+}
+
+.appendix table { font-size: 0.84rem; }
+.appendix .table-wrap { margin-top: 1.2rem; }
+
+footer {
+  position: relative;
+  z-index: 1;
+  max-width: 72ch;
+  margin: 3rem auto 0;
+  padding: 1.5rem 0 3rem;
+  border-top: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.65;
+  color: var(--muted);
+  text-transform: lowercase;
+}
+
+footer p { margin: 0 0 0.5rem; }
+
+footer .proper-name { text-transform: none; }
+
+.toc,
+.abstract,
+.article,
+.appendix,
+footer {
+  text-transform: lowercase;
+}
+
+.article code,
+.appendix code,
+.abstract code,
+footer code,
+pre,
+.pipeline-svg,
+.pipeline-svg text {
+  text-transform: none;
+}
+
+@media (max-width: 900px) {
+  figure.diagram::after,
+  figure.sketch::after {
+    content: "scroll for the full figure";
+    display: block;
+    max-width: 72ch;
+    margin: 0.35rem auto 0;
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    color: var(--muted);
+    text-align: center;
+  }
+}
+
+@media (max-width: 720px) {
+  body { font-size: 17px; }
+  .table-caption::after {
+    content: " · scroll for the full table";
+    color: var(--accent-2);
+  }
+  .table-wrap, .diagram-scroll, .sketch .paper {
+    scrollbar-width: thin;
+    scrollbar-color: var(--accent) var(--panel);
+  }
+  .table-wrap::-webkit-scrollbar, .diagram-scroll::-webkit-scrollbar, .sketch .paper::-webkit-scrollbar { height: 6px; }
+  .table-wrap::-webkit-scrollbar-thumb, .diagram-scroll::-webkit-scrollbar-thumb, .sketch .paper::-webkit-scrollbar-thumb {
+    background: var(--accent);
+    border-radius: 3px;
+  }
+  .wrap { padding: 0 1rem; }
+  .topbar-inner { padding: 0.6rem 1rem; }
+  .hero { padding-top: 3rem; }
+  .article p,
+  .appendix p { font-size: 1.02rem; }
+  .table-wrap,
+  .diagram,
+  .sketch { margin-left: -1rem; margin-right: -1rem; }
+  .table-wrap { border-left: 0; border-right: 0; }
+  .diagram pre { border-left: 0; border-right: 0; }
+  .sketch .paper { border-left: 0; border-right: 0; }
+  .pipeline-svg { min-width: 900px; }
+  .toc-grid { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+
+@media print {
+  :root,
+  [data-theme="dark"],
+  [data-theme="light"] {
+    --bg: #fff;
+    --text: #000;
+    --muted: #444;
+    --accent: #000;
+    --accent-2: #000;
+    --accent-soft: #fff;
+    --rule: #ccc;
+    --panel: #fff;
+    --table-head: #f2f2f2;
+    --code-bg: #f5f5f5;
+    --code-text: #000;
+    --code-muted: #555;
+    --code-reg: #000;
+  }
+  #progress,
+  .topbar,
+  .toc { display: none; }
+  body {
+    background: #fff;
+    color: #000;
+    font-size: 11pt;
+  }
+  .wrap { max-width: none; padding: 0; }
+  a { color: #000; }
+  .article > p,
+  .article > h2,
+  .article > h3,
+  .article > ul,
+  .article > ol,
+  .appendix p,
+  .appendix h2,
+  .appendix h3,
+  figcaption,
+  .table-caption { max-width: none; }
+  pre { white-space: pre-wrap; }
+  figure.diagram::after,
+  figure.sketch::after,
+  .table-caption::after { content: none; }
+  .pipeline-svg,
+  .sketch svg { min-width: 0; }
+  .table-wrap,
+  .diagram,
+  .sketch { break-inside: avoid; }
+  tr { break-inside: avoid; }
+  thead { display: table-header-group; }
+  .sketch .paper { box-shadow: none; }
+}
+</style>
+</head>
+<body id="top">
+<a class="skip" href="#main">skip to content</a>
+<div id="progress" aria-hidden="true"></div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="#top">emmy PTX</a>
+    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle color theme">light</button>
+  </div>
+</header>
+<div class="wrap">
+  <header class="hero">
+    <p class="eyebrow">emmy ptx / an independent technical write-up</p>
+    <h1>the compiler was correct. it was 43 times too slow.</h1>
+    <p class="subtitle">building a direct emmy kernel ir to ptx compiler that passed the 15 open problems, and the measurements that changed it</p>
+    <p class="meta"><span>date 2 November 2026</span><span class="sep">/</span><span>read 28 min</span><span class="sep">/</span><span>titoatwork</span></p>
+    <p class="hero-note">(an independent write-up about the compiler, not the hackathon submission. the submission window is closed.)</p>
+    <p class="hero-links"><a href="https://github.com/titoatwork">github</a><span class="sep">/</span><a href="https://github.com/titoatwork/emmy-ptx-compiler-submission">submission repo</a><span class="sep">/</span><a href="https://youtu.be/LO_Msz4fN30">video</a></p>
+  </header>
+  <main id="main">
+    <section class="abstract" aria-labelledby="summary-label">
+      <p class="label" id="summary-label">summary</p>
+      <p>Between 21 and 28 October 2026 I wrote a compiler that turns <a href="https://github.com/cloudrift-ai/emmy">Emmy</a>'s Kernel IR into PTX. It is one Python process, one emission walk over the statement tree after a few analysis scans, and no CUDA C++ intermediate. The public artifact is 200 files at commit <code>4018a9e</code>, tag <code>v1.0.0</code>. It passes 15/15 open problems on the hosted runner twice, 46/46 checked-in variants, 86/86 generated corpus IRs in 85 packages, 147/147 local IR compilations, 8/8 holdout shapes in the audit, and 92 unit and contract tests. The 88-cell matrix reports absolute medians and a disclosed residual. The 43x in the title is the ratio of the first working compiler's local time to the fast end of the m01 reference range, not the speedup of the later fix.</p>
+<p>The two 15/15 runs were on the code-identical working revision <code>9b81f01</code> before the release commit; the exact tagged tree was not itself launched on the hosted runner.</p>
+<p>The story is not a feature list. A compiler is a stack of promises about which thread is active, which register is live, and which memory is initialized. The work is finding the promise that is false. Three promises survived contact with the GPU: the launch is the contract, accumulator ownership belongs to the loop statement, and state read under a predicate must be defined unconditionally. The speed work became measured changes, several of which the machine rejected.</p>
+<p>This post explains the pipeline, the three invariants, the 43x index bug, the shared-memory and warp-level mechanisms, the negative results, the verification ladder, and the seven edge cases outside the proof. It also states where the evidence stops: the public CSV carries absolute medians, not the reference column, and the 1024 SASS is reported but not committed.</p>
+<p class="takeaway">If you remember three things: the launch is the contract, ownership is the architecture, and state read under a predicate must be defined unconditionally.</p>
+
+    </section>
+    <nav class="toc" aria-label="Contents">
+      <p class="label">contents</p>
+      <div class="toc-grid">
+        <a href="#1-the-wrong-answer"><span class="toc-num" aria-hidden="true">1</span><span> The wrong answer</span></a>
+<a href="#2-the-contract-and-the-shape-of-the-compiler"><span class="toc-num" aria-hidden="true">2</span><span> The contract and the shape of the compiler</span></a>
+<a href="#3-the-three-invariants"><span class="toc-num" aria-hidden="true">3</span><span> The three invariants</span></a>
+<a href="#4-the-performance-descent"><span class="toc-num" aria-hidden="true">4</span><span> The performance descent</span></a>
+<a href="#5-what-the-machine-rejected-gated-or-kept"><span class="toc-num" aria-hidden="true">5</span><span> What the machine rejected, gated, or kept</span></a>
+<a href="#6-verification-and-the-public-artifact"><span class="toc-num" aria-hidden="true">6</span><span> Verification and the public artifact</span></a>
+<a href="#7-the-boundary-and-the-lessons"><span class="toc-num" aria-hidden="true">7</span><span> The boundary and the lessons</span></a>
+<a href="#evidence"><span class="toc-num" aria-hidden="true">E</span><span> Evidence</span></a>
+      </div>
+    </nav>
+    <article class="article">
+      <h2 id="1-the-wrong-answer">1. The wrong answer</h2>
+<p class="lede">A broken compiler does not crash. It hands you plausible numbers.</p>
+<p>I said that in the recorded video, and it is the sentence that organized the project. The 64 by 64 attention kernel was the proof. It compiled, it assembled, it ran, and it returned numbers with the right shape and the right dtype. Three of the four output rows were the mean of <code>v</code>. The fourth was correct.</p>
+<p>The design note records the cause. The kernel has four dot products over <code>a2</code> inside one loop over <code>a1</code>. Each dot owns an accumulator. The first seeder associated each accumulator with the axis name. When the second loop opened, the seeder reset all four siblings to the same state. Three rows stopped being independent dot products and became the same sum divided by the same denominator.</p>
+<p>I had treated the IR as the contract. It is not. The launch, the parameter order and the memory budget live beside it in <code>meta.json</code>. The compiler was not one big translation. It was a stack of small proofs, and every proof had a failure that taught the next invariant. The question that drove the rest of the work was simple: what does the machine actually execute?</p>
+<h2 id="2-the-contract-and-the-shape-of-the-compiler">2. The contract and the shape of the compiler</h2>
+<p>The input is a typed statement tree. <code>Tile</code>, <code>Load</code>, <code>Write</code>, <code>Accum</code>, <code>Let</code>, <code>Assign</code>, <code>Cond</code>, <code>Sync</code>, <code>Smem</code>, <code>WarpShuffle</code>, <code>TreeHalve</code>, <code>CpAsyncCopy</code>, <code>ZeroPrologue</code>, and the documented expression nodes. The second input is <code>meta.json</code>: the entry name, <code>arg_order</code>, grid, block, shared-memory budget, and the argument descriptions. The command is one line:</p>
+<pre data-lang="bash"><code class="language-bash">python compile.py kernel.ir.json &gt; out.ptx
+</code></pre>
+<h3 id="five-modules-one-emission-walk">Five modules, one emission walk</h3>
+<p>The module shape is five jobs. <code>ptxc/lower.py</code> owns the prologue, the Tile decode, the cache selection, the top-level seeds and the module assembly. <code>ptxc/stmts.py</code> owns the statement walk, including the loop-entry seeds. <code>ptxc/expr.py</code> owns expressions, indices and predicates. <code>ptxc/memory.py</code> owns addresses, shared layout and alignment. <code>ptxc/common.py</code>, <code>ptxc/ops.py</code> and <code>ptxc/emitter.py</code> own the tables and the text. There is no intermediate IR.</p>
+<figure class="diagram pipeline"><div class="diagram-scroll"><svg class="pipeline-svg" viewBox="0 0 1360 300" role="img" aria-labelledby="pipeline-title pipeline-desc" xmlns="http://www.w3.org/2000/svg">
+<title id="pipeline-title">One emission walk from Kernel IR to PTX</title>
+<desc id="pipeline-desc">kernel.ir.json and meta.json enter compile.py, then lower.py, stmts.py, expr.py, memory.py and emitter.py produce out.ptx. There is no intermediate IR.</desc>
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+    <path d="M 0 0 L 10 5 L 0 10 z" class="arrowhead"/>
+  </marker>
+</defs>
+<g class="box">
+  <rect x="20" y="46" width="150" height="48" rx="8"/>
+  <text x="95" y="75" text-anchor="middle" class="box-title">kernel.ir.json</text>
+</g>
+<g class="box">
+  <rect x="20" y="166" width="150" height="48" rx="8"/>
+  <text x="95" y="195" text-anchor="middle" class="box-title">meta.json</text>
+</g>
+<path d="M 170 70 C 195 70, 195 130, 210 130" class="arrow" marker-end="url(#arrow)"/>
+<path d="M 170 190 C 195 190, 195 130, 210 130" class="arrow" marker-end="url(#arrow)"/>
+<g class="box accent">
+  <rect x="210" y="106" width="120" height="48" rx="8"/>
+  <text x="270" y="135" text-anchor="middle" class="box-title">compile.py</text>
+</g>
+<path d="M 330 130 H 360" class="arrow" marker-end="url(#arrow)"/>
+<g class="box">
+  <rect x="360" y="106" width="150" height="48" rx="8"/>
+  <text x="435" y="128" text-anchor="middle" class="box-title">lower.py</text>
+  <text x="435" y="144" text-anchor="middle" class="box-sub">prologue, caches</text>
+</g>
+<path d="M 510 130 H 540" class="arrow" marker-end="url(#arrow)"/>
+<g class="box">
+  <rect x="540" y="106" width="140" height="48" rx="8"/>
+  <text x="610" y="128" text-anchor="middle" class="box-title">stmts.py</text>
+  <text x="610" y="144" text-anchor="middle" class="box-sub">statement walk</text>
+</g>
+<path d="M 680 130 H 710" class="arrow" marker-end="url(#arrow)"/>
+<g class="box">
+  <rect x="710" y="106" width="150" height="48" rx="8"/>
+  <text x="785" y="128" text-anchor="middle" class="box-title">expr.py</text>
+  <text x="785" y="144" text-anchor="middle" class="box-sub">expressions</text>
+</g>
+<path d="M 860 130 H 880" class="arrow" marker-end="url(#arrow)"/>
+<g class="box">
+  <rect x="880" y="106" width="140" height="48" rx="8"/>
+  <text x="950" y="128" text-anchor="middle" class="box-title">memory.py</text>
+  <text x="950" y="144" text-anchor="middle" class="box-sub">addresses</text>
+</g>
+<path d="M 1020 130 H 1050" class="arrow" marker-end="url(#arrow)"/>
+<g class="box">
+  <rect x="1050" y="106" width="140" height="48" rx="8"/>
+  <text x="1120" y="128" text-anchor="middle" class="box-title">emitter.py</text>
+  <text x="1120" y="144" text-anchor="middle" class="box-sub">tables, PTX text</text>
+</g>
+<path d="M 1190 130 H 1220" class="arrow" marker-end="url(#arrow)"/>
+<g class="box output">
+  <rect x="1220" y="106" width="110" height="48" rx="8"/>
+  <text x="1275" y="135" text-anchor="middle" class="box-title">out.ptx</text>
+</g>
+<text x="675" y="240" text-anchor="middle" class="note">one emission pass over the statement tree, no intermediate IR</text>
+</svg></div><figcaption>Figure 1. The pipeline is one emission walk over the statement tree after a few analysis scans. There is no intermediate IR between the Kernel IR and PTX, so the optimizations are applied while the tree is being lowered.</figcaption><p class="sr-only">Alt text: A left-to-right diagram. <code>kernel.ir.json</code> and <code>meta.json</code> enter <code>compile.py</code>, which calls <code>lower.py</code>, then the statement walk, expression lowering, memory addressing, and the emitter, producing <code>out.ptx</code>.</p></figure>
+<p>The smallest real example is p00. It has 64 cells, a block of 256 threads, and two elements per cell. The IR says:</p>
+<pre data-lang="text"><code class="language-text">Tile[a0] (N=64)
+    in0__u0 = load x0[(a0 * 2) + 0]
+    in1__u0 = load x1[(a0 * 2) + 0]
+    f32 v0__u0 = add(in0__u0, in1__u0)
+    in0__u1 = load x0[(a0 * 2) + 1]
+    in1__u1 = load x1[(a0 * 2) + 1]
+    f32 v0__u1 = add(in0__u1, in1__u1)
+    add[(a0 * 2) + 0] = (v0__u0, v0__u1)
+</code></pre>
+<p>The compiler emits a header, a signature, and a guard. The header names the kernel; the signature follows <code>arg_order</code>; the guard compares the flattened work id against the tile size:</p>
+<pre data-lang="ptx"><code class="language-ptx">.visible .entry k_add_pointwise(
+        .param .u64 param_x0,
+        .param .u64 param_x1,
+        .param .u64 param_add
+)
+.maxntid 256, 1, 1
+...
+        mov.u32 %r1, %tid.x;
+        mov.u32 %r2, %ctaid.x;
+        mov.u32 %r3, %ntid.x;
+        mad.lo.u32 %r4, %r2, %r3, %r1;
+        setp.ge.u32 %p1, %r4, 64;
+        @%p1 bra $L1;
+</code></pre>
+<p>The entry name is the kernel name. The parameters follow <code>arg_order</code>, not the IR node's input order. Buffers are <code>.u64</code> pointers; scalars are typed <code>.param</code> values. The launch geometry is read from <code>meta.json</code>; the compiler does not infer it. The guard is not decoration. 256 threads are launched for 64 cells, so 192 threads must do nothing. One comparison covers all of them.</p>
+<p>That is the contract in plain language. The compiler is allowed to choose instructions. It is not allowed to choose the launch.</p>
+<div class="table-wrap"><table class="open-problems">
+<thead>
+<tr>
+  <th>category</th>
+  <th>cell</th>
+  <th>launch (grid x block)</th>
+  <th>what it forces</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>pointwise</td>
+  <td>p00</td>
+  <td>1 x 256</td>
+  <td>64 cells on 256 threads; over-provisioned guard; vector store</td>
+</tr>
+<tr>
+  <td>pointwise</td>
+  <td>p01</td>
+  <td>2 x 256</td>
+  <td>1D pointwise, 1024 elements</td>
+</tr>
+<tr>
+  <td>pointwise</td>
+  <td>p02</td>
+  <td>4 x 256</td>
+  <td>constant buffers as kernel arguments</td>
+</tr>
+<tr>
+  <td>pointwise</td>
+  <td>p03</td>
+  <td>2 x 256</td>
+  <td>relu and multiply</td>
+</tr>
+<tr>
+  <td>reduction</td>
+  <td>r01</td>
+  <td>1 x 128</td>
+  <td>warp shuffle and shared tree</td>
+</tr>
+<tr>
+  <td>reduction</td>
+  <td>r02</td>
+  <td>1 x 128</td>
+  <td>65,536-element stride</td>
+</tr>
+<tr>
+  <td>reduction</td>
+  <td>r03</td>
+  <td>1 x 128</td>
+  <td>mean with a count buffer</td>
+</tr>
+<tr>
+  <td>reduction</td>
+  <td>r04</td>
+  <td>64 x 128</td>
+  <td>2D row sums</td>
+</tr>
+<tr>
+  <td>matmul</td>
+  <td>m01</td>
+  <td>128 x 512</td>
+  <td><code>cp.async</code>, three-stage shared tile</td>
+</tr>
+<tr>
+  <td>matmul</td>
+  <td>m02</td>
+  <td>512 x 256</td>
+  <td>static shared tile, atomic add</td>
+</tr>
+<tr>
+  <td>fused</td>
+  <td>f01</td>
+  <td>64 x 128</td>
+  <td>rmsnorm, reduction plus elementwise</td>
+</tr>
+<tr>
+  <td>fused</td>
+  <td>f02</td>
+  <td>64 x 128</td>
+  <td>online softmax, two coupled accumulators</td>
+</tr>
+<tr>
+  <td>fused</td>
+  <td>f03</td>
+  <td>64 x 128</td>
+  <td>l2norm</td>
+</tr>
+<tr>
+  <td>attention</td>
+  <td>a01</td>
+  <td>4 x 128</td>
+  <td>four dots, online softmax, 64x64</td>
+</tr>
+<tr>
+  <td>attention</td>
+  <td>a02</td>
+  <td>128 x 32</td>
+  <td>128x32 attention, softmax fused into a matmul</td>
+</tr>
+</tbody>
+</table></div>
+<p class="table-caption">Table 1. The 15 open problems. All passed on the hosted runner twice on 2026-10-28. The launch column is grid x block from <code>meta.json</code>.</p>
+<h3 id="the-eligibility-boundary">The eligibility boundary</h3>
+<p>Emmy supplies the IR types and the deserializer (<code>Graph.from_dict</code>); the compiler never calls the renderer. The compiler does not call <code>render_kernelop</code>, <code>emmy compile</code>, <code>nvcc</code>, NVRTC, or generated CUDA. Every PTX instruction is emitted by this compiler. The runner assembles the emitted PTX with <code>ptxas</code> downstream. The public repository is one squashed code commit plus three README-only commits that add and correct the video link (<code>68bc29e</code>, <code>38e7e22</code>, <code>0420989</code>); the working history is longer. The public artifact is the thing a reader can inspect. The process record is not the artifact.</p>
+<p>This boundary is worth stating precisely because the task's rule is about the translation, not the file extension. A submission that chains Emmy's CUDA renderer to <code>nvcc -ptx</code> would produce working PTX and would not be eligible. The compiler here starts at the Kernel IR and ends at PTX text. The only external package in the compile path is Emmy, used for the IR types and the deserializer, never the renderer.</p>
+<p>The first working compiler passed all 15 open problems. It was also about 43 times the fast end of the m01 reference range: 6024 microseconds on the local RTX 3050 against 141 microseconds, 30 times the 200 microsecond slow end. The working log records the range but not the reference implementation's identity or GPU. The first working compiler was correct enough to pass. It was not fast on the machine.</p>
+<h2 id="3-the-three-invariants">3. The three invariants</h2>
+<p>The first working compiler passed. The promise the early versions broke was the launch.</p>
+<p>A compiler is a set of promises about which register is live, which thread is active, and which memory is initialized. The invariants are the promises that survived contact with the GPU. Every optimization in the next section depends on them being true, so they come before the speed work.</p>
+<figure class="sketch">
+  <div class="paper">
+    <svg class="sketch-svg" viewBox="0 0 1000 560" role="img" aria-labelledby="three-promises-title three-promises-desc" xmlns="http://www.w3.org/2000/svg">
+<title id="three-promises-title">The three promises, sketched</title>
+<desc id="three-promises-desc">A hand-drawn triptych. The launch column shows 256 threads with 64 working cells, a gid &lt; N guard, and the note 64 work, 192 skip. The seed column shows one loop over a1 with four dot a2 boxes feeding four accumulator boxes, and the note seed per loop instance, not by axis name. The state column shows a prologue base, a lane zero branch, and the note define it before the branch. A full-width band carries the shared consequence.</desc>
+<style>
+.sketch-svg text { font-family: "Kalam", "Comic Sans MS", cursive; fill: currentColor; text-transform: none; }
+.sketch-svg .mono { font-family: "Fira Mono", "Cascadia Mono", Consolas, monospace; }
+.sketch-svg .ink { color: #1e1e1e; }
+.sketch-svg .accent { color: #a93b2f; }
+.sketch-svg .blue { color: #2b5f8a; }
+.sketch-svg .muted { color: #7a7366; }
+.sketch-svg .red { color: #c0392b; }
+</style>
+<text x="40" y="48" font-size="30" text-anchor="start" font-weight="400" class="ink">three promises the gpu made me keep</text>
+<path d="M 40.2 61.5 Q 289.7 61.4 540.0 61.8" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="accent" opacity="0.96"/>
+<text x="40" y="82" font-size="15" text-anchor="start" font-weight="400" class="muted">the invariants are the promises that survived contact with the machine.</text>
+<path d="M 339.4 109.9 Q 339.8 280.0 339.5 449.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="5 7" class="muted" opacity="0.96"/>
+<path d="M 659.5 109.7 Q 660.0 280.1 660.2 450.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="5 7" class="muted" opacity="0.96"/>
+<text x="40" y="120" font-size="20" text-anchor="start" font-weight="400" class="accent">01 / the launch</text>
+<text x="360" y="120" font-size="20" text-anchor="start" font-weight="400" class="accent">02 / the seed</text>
+<text x="680" y="120" font-size="20" text-anchor="start" font-weight="400" class="accent">03 / the state</text>
+<path d="M 56.6 149.5 Q 152.1 149.9 248.4 149.7" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 247.8 150.4 Q 247.6 245.6 247.6 342.1" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 248.1 341.5 Q 152.2 341.9 55.5 341.6" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 55.8 342.1 Q 56.2 245.9 55.9 149.8" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<rect x="57" y="151" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="151" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="151" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="151" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="151" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="151" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="151" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="151" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="151" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="151" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="151" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="151" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="151" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="151" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="151" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="151" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="57" y="163" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="163" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="163" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="163" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="163" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="163" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="163" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="163" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="163" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="163" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="163" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="163" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="163" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="163" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="163" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="163" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="57" y="175" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="175" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="175" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="175" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="175" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="175" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="175" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="175" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="175" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="175" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="175" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="175" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="175" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="175" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="175" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="175" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="57" y="187" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="187" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="187" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="187" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="187" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="187" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="187" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="187" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="187" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="187" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="187" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="187" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="187" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="187" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="187" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="187" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="57" y="199" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="199" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="199" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="199" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="199" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="199" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="199" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="199" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="199" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="199" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="199" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="199" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="199" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="199" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="199" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="199" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="57" y="211" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="211" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="211" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="211" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="211" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="211" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="211" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="211" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="211" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="211" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="211" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="211" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="211" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="211" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="211" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="211" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="57" y="223" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="223" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="223" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="223" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="223" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="223" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="223" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="223" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="223" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="223" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="223" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="223" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="223" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="223" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="223" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="223" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="57" y="235" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="235" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="235" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="235" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="235" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="235" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="235" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="235" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="235" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="235" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="235" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="235" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="235" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="235" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="235" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="235" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="57" y="247" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="247" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="247" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="247" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="247" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="247" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="247" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="247" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="247" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="247" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="247" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="247" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="247" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="247" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="247" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="247" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="57" y="259" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="259" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="259" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="259" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="259" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="259" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="259" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="259" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="259" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="259" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="259" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="259" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="259" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="259" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="259" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="259" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="57" y="271" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="271" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="271" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="271" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="271" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="271" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="271" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="271" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="271" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="271" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="271" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="271" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="271" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="271" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="271" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="271" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="57" y="283" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="283" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="283" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="283" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="283" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="283" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="283" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="283" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="283" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="283" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="283" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="283" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="283" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="283" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="283" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="283" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="57" y="295" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="295" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="295" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="295" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="295" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="295" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="295" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="295" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="295" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="295" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="295" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="295" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="295" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="295" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="295" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="295" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="57" y="307" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="307" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="307" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="307" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="307" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="307" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="307" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="307" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="307" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="307" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="307" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="307" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="307" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="307" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="307" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="307" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="57" y="319" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="319" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="319" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="319" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="319" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="319" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="319" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="319" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="319" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="319" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="319" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="319" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="319" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="319" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="319" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="319" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="57" y="331" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="69" y="331" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="81" y="331" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="93" y="331" width="10" height="10" fill="#a93b2f" opacity="0.30" stroke="none"/>
+<rect x="105" y="331" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="117" y="331" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="129" y="331" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="141" y="331" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="153" y="331" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="165" y="331" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="177" y="331" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="189" y="331" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="201" y="331" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="213" y="331" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="225" y="331" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<rect x="237" y="331" width="10" height="10" fill="none" stroke="#1e1e1e" stroke-width="0.5" opacity="0.28"/>
+<text x="56" y="362" font-size="15" text-anchor="start" font-weight="400" class="ink">64 work / 192 skip</text>
+<text x="56" y="380" font-size="12" text-anchor="start" font-weight="400" class="muted mono">256 threads, 64 cells</text>
+<path d="M 149.7 396.1 Q 205.3 396.2 260.0 396.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 260.6 395.5 Q 260.3 411.8 259.9 428.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 259.4 428.2 Q 204.6 428.0 150.3 428.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 150.2 428.1 Q 150.4 411.8 150.1 395.9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<text x="205" y="417" font-size="14" text-anchor="middle" font-weight="400" class="blue mono">gid &lt; N</text>
+<path d="M 248.0 342.2 Q 230.0 365.6 210.7 388.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="blue" opacity="0.96"/>
+<polygon points="205.0,396.0 207.7,385.4 214.7,391.0" fill="currentColor" stroke="none" class="blue"/>
+<text x="156" y="444" font-size="12" text-anchor="start" font-weight="400" class="muted">one guard</text>
+<path d="M 376.4 149.7 Q 500.2 150.5 623.9 150.2" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 375.6 149.5 Q 499.5 150.0 623.5 150.3" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.38"/>
+<path d="M 623.9 150.4 Q 623.6 269.7 623.5 389.9" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 624.4 150.4 Q 624.1 270.4 623.7 389.9" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.38"/>
+<path d="M 624.5 389.6 Q 499.8 390.4 375.6 389.7" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 624.1 389.7 Q 499.7 390.0 375.4 389.9" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.38"/>
+<path d="M 376.5 390.2 Q 375.9 270.1 376.0 150.1" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 376.5 390.3 Q 376.2 269.5 376.4 150.4" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.38"/>
+<text x="390" y="172" font-size="15" text-anchor="start" font-weight="400" class="accent mono">for a1</text>
+<path d="M 389.5 185.2 Q 437.4 184.9 484.5 184.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 484.8 184.5 Q 484.7 199.6 484.4 214.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 484.4 215.4 Q 437.1 214.8 390.1 214.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 389.8 214.5 Q 389.7 199.8 390.4 185.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="437" y="205" font-size="13" text-anchor="middle" font-weight="400" class="ink mono">dot a2</text>
+<path d="M 524.5 184.5 Q 570.0 185.0 614.8 184.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 614.4 185.5 Q 615.4 199.6 615.0 214.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 615.0 215.6 Q 570.0 214.5 525.4 215.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 524.6 215.3 Q 524.7 199.9 525.0 185.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<text x="570" y="205" font-size="13" text-anchor="middle" font-weight="400" class="blue mono">acc0</text>
+<path d="M 485.4 200.6 Q 499.8 199.7 515.4 200.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" class="blue" opacity="0.96"/>
+<polygon points="525.0,200.0 515.0,204.5 515.0,195.5" fill="currentColor" stroke="none" class="blue"/>
+<path d="M 389.7 230.0 Q 437.9 230.3 484.8 229.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 484.7 230.2 Q 484.5 244.8 485.5 259.9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 485.5 259.8 Q 438.0 260.5 389.7 259.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 390.1 260.5 Q 389.7 244.7 390.4 230.0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="437" y="250" font-size="13" text-anchor="middle" font-weight="400" class="ink mono">dot a2</text>
+<path d="M 524.5 230.2 Q 570.2 230.3 615.5 230.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 614.6 230.3 Q 615.3 245.0 614.8 260.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 614.9 260.5 Q 570.5 259.9 525.3 259.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 525.5 260.4 Q 524.6 244.6 524.6 230.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<text x="570" y="250" font-size="13" text-anchor="middle" font-weight="400" class="blue mono">acc1</text>
+<path d="M 484.8 245.1 Q 500.6 245.2 514.6 244.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" class="blue" opacity="0.96"/>
+<polygon points="525.0,245.0 515.0,249.5 515.0,240.5" fill="currentColor" stroke="none" class="blue"/>
+<path d="M 390.0 275.5 Q 438.0 275.2 484.9 275.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 484.7 274.8 Q 485.4 289.7 484.7 305.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 484.6 305.5 Q 437.2 304.9 389.8 304.9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 389.9 305.5 Q 390.1 290.4 390.0 275.0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="437" y="295" font-size="13" text-anchor="middle" font-weight="400" class="ink mono">dot a2</text>
+<path d="M 524.9 274.6 Q 570.0 274.5 614.4 275.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 615.3 275.1 Q 614.6 290.0 614.8 305.0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 614.5 305.1 Q 570.1 305.3 524.7 304.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 525.1 305.3 Q 525.3 290.0 525.5 274.9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<text x="570" y="295" font-size="13" text-anchor="middle" font-weight="400" class="blue mono">acc2</text>
+<path d="M 485.0 290.2 Q 500.1 290.0 514.9 290.0" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" class="blue" opacity="0.96"/>
+<polygon points="525.0,290.0 515.0,294.5 515.0,285.5" fill="currentColor" stroke="none" class="blue"/>
+<path d="M 390.2 320.5 Q 437.5 320.5 485.5 319.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 485.4 319.6 Q 485.1 335.5 484.5 349.9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 484.5 350.2 Q 437.0 349.7 390.3 350.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 390.2 349.6 Q 389.6 335.2 390.5 320.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="437" y="340" font-size="13" text-anchor="middle" font-weight="400" class="ink mono">dot a2</text>
+<path d="M 524.9 320.0 Q 569.7 320.5 615.6 320.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 615.0 319.8 Q 614.6 334.9 614.6 349.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 615.1 349.9 Q 570.2 349.5 524.4 349.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 524.5 350.6 Q 525.1 335.0 525.3 320.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<text x="570" y="340" font-size="13" text-anchor="middle" font-weight="400" class="blue mono">acc3</text>
+<path d="M 484.4 335.3 Q 499.5 334.7 514.7 334.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" class="blue" opacity="0.96"/>
+<polygon points="525.0,335.0 515.0,339.5 515.0,330.5" fill="currentColor" stroke="none" class="blue"/>
+<text x="376" y="412" font-size="15" text-anchor="start" font-weight="400" class="blue">seed per loop instance</text>
+<text x="376" y="432" font-size="13" text-anchor="start" font-weight="400" class="red">not by axis name</text>
+<path d="M 376.4 435.7 Q 437.9 436.3 499.6 436.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" class="red" opacity="0.96"/>
+<path d="M 695.5 149.5 Q 820.1 150.2 944.2 149.9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 944.2 150.4 Q 943.5 175.5 943.5 200.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 943.9 199.8 Q 819.5 200.4 696.1 200.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 696.0 199.7 Q 695.7 174.6 695.5 149.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<text x="706" y="172" font-size="15" text-anchor="start" font-weight="400" class="blue">prologue</text>
+<text x="706" y="190" font-size="12" text-anchor="start" font-weight="400" class="muted mono">base, lane, warp</text>
+<path d="M 920 170 l 4.8999999999999995 4.8999999999999995 l 10.5 -13.299999999999999" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="blue"/>
+<path d="M 819.8 199.8 Q 819.5 209.6 820.3 219.7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<polygon points="820.0,230.0 815.5,220.0 824.5,220.0" fill="currentColor" stroke="none" class="ink"/>
+<path d="M 695.8 229.4 Q 820.0 229.6 943.7 229.4" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 943.6 230.0 Q 944.3 267.6 944.5 304.5" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 944.0 305.4 Q 820.4 304.9 695.9 305.0" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 695.8 305.4 Q 696.2 268.0 696.2 230.2" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="706" y="255" font-size="14" text-anchor="start" font-weight="400" class="ink mono">if (lane == 0)</text>
+<path d="M 824.5 270.6 Q 877.4 270.8 929.5 271.3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 929.5 271.4 Q 929.7 284.6 930.4 299.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 929.8 299.0 Q 877.3 298.7 824.6 298.9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 825.6 299.1 Q 824.7 285.5 824.7 271.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="877" y="290" font-size="12" text-anchor="middle" font-weight="400" class="ink mono">base</text>
+<path d="M 705.4 319.9 Q 758.3 319.8 811.0 320.0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 810.4 319.7 Q 810.7 334.0 810.5 347.9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 810.8 347.7 Q 758.0 347.5 706.1 348.0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 706.3 348.5 Q 706.3 334.2 705.9 319.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="758" y="339" font-size="12" text-anchor="middle" font-weight="400" class="ink mono">bar.sync</text>
+<text x="696" y="390" font-size="13" text-anchor="start" font-weight="400" class="red">base first used here</text>
+<path d="M 845.3 390.2 Q 845.6 349.1 844.5 309.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" class="red" opacity="0.96"/>
+<polygon points="845.0,299.0 849.5,309.0 840.5,309.0" fill="currentColor" stroke="none" class="red"/>
+<text x="696" y="420" font-size="13" text-anchor="start" font-weight="400" class="blue">define it before the branch</text>
+<path d="M 682 420 l 3.5 3.5 l 7.5 -9.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="blue"/>
+<rect x="40" y="470" width="920" height="56" fill="#f0ebdf" stroke="none"/>
+<path d="M 40.3 470.4 Q 500.2 470.1 959.6 470.0" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="5 7" class="muted" opacity="0.96"/>
+<text x="56" y="495" font-size="15" text-anchor="start" font-weight="400" class="ink">a compiler is a set of promises: which thread is active,</text>
+<text x="56" y="515" font-size="15" text-anchor="start" font-weight="400" class="ink">which register is live, which memory is initialized.</text>
+</svg>
+  </div>
+  <figcaption>Figure 2. The three promises, sketched: the launch is the contract, the seed belongs to the loop instance, and state read under a predicate is defined unconditionally.</figcaption>
+  <p class="sr-only">Alt text: A hand-drawn triptych. The launch panel shows 256 threads with 64 working cells, one gid &lt; N guard, and the note 64 work, 192 skip. The seed panel shows one loop over a1 with four dot a2 boxes feeding four accumulator boxes, and the note seed per loop instance, not by axis name. The state panel shows a prologue base, a lane zero branch, and the note define it before the branch. A full-width band carries the shared consequence.</p>
+</figure>
+
+<h3 id="invariant-1-the-launch-is-the-contract">Invariant 1: the launch is the contract</h3>
+<p>The compiler flattens the block and thread ids into one work id:</p>
+<pre data-lang="text"><code class="language-text">gid = blockIdx.x * blockDim.x + threadIdx.x
+idx_i = (gid / suffix_i) % extent_i
+suffix_i = product of the extents to the right of axis i
+</code></pre>
+<p>The suffix divide and the modulo turn one linear id into a coordinate. The final modulo is not optional. The final guard is not optional either. The guard is a single comparison:</p>
+<pre data-lang="text"><code class="language-text">if (gid &lt; N) { ... }
+</code></pre>
+<p>That one comparison is correct for every over-provisioned launch because the decode is exact for every <code>gid</code>, including the ids that fall outside the tile. p00 is the smallest case: 64 cells, 256 threads. The first 64 threads own work; the other 192 skip the body. The same pattern covers a 2D row reduction where the launch has more threads than rows.</p>
+<p>An exact launch skips the guard. When the launched thread count equals the tile size, every thread owns a tile and the comparison is provably true. The compiler emits the guard only when <code>N &lt; launch</code> (<code>ptxc/lower.py:818</code>). The optimization is safe because the condition is a static property of <code>meta.json</code> and the tile, not a guess. The open set includes both exact and over-provisioned launches.</p>
+<p>I got this wrong twice. The design note records both. The final modulo was skipped. In a 2D row reduction, that made every thread start at its global id, and only the leading rows were written. The guard was also missing in an early version, so the over-provisioned threads read past the end of the buffer. The fixes are in <code>_emit_tile</code> and <code>_gid</code> (<code>ptxc/lower.py:736</code> and <code>ptxc/lower.py:828</code>). The guard is emitted at <code>ptxc/lower.py:818-825</code>. The open-set contract and the over-provisioned pointwise case are the tests. The lesson is that a guard is not defensive decoration. It is the correctness proof for an over-provisioned launch.</p>
+<figure class="diagram"><div class="diagram-scroll"><pre data-lang="text"><code class="language-text">p00: Tile N = 64, block = 256
+gid = ctaid.x * ntid.x + tid.x
+      0 .. 63       64 .. 255
+      work          inactive
+guard: setp.ge.u32 p, gid, 64
+       @p bra done
+</code></pre></div><figcaption>Figure 3. One flattened <code>gid</code> plus one <code>gid &lt; N</code> guard makes an over-provisioned launch correct. In p00, 192 of the 256 launched threads skip the body.</figcaption><p class="sr-only">Alt text: A diagram of p00. 256 threads are launched, the first 64 own work, and the last 192 are skipped by a single comparison against N.</p></figure>
+<h3 id="invariant-2-a-seed-belongs-to-the-loop-statement-not-the-axis-name">Invariant 2: a seed belongs to the loop statement, not the axis name</h3>
+<p>The loop body is emitted once. An accumulator is a register that the fold writes back into on every iteration. If the seed is wrong, the fold is wrong for every iteration after the first one.</p>
+<p>a01 makes the problem concrete. It has four dot products over <code>a2</code> inside one loop over <code>a1</code>:</p>
+<pre data-lang="text"><code class="language-text">for a1 in 0..64
+    for a2 in 0..64: q[row0, a2] * kt[a2, a1] -&gt; acc0__ar0
+    for a2 in 0..64: q[row1, a2] * kt[a2, a1] -&gt; acc0__ar1
+    for a2 in 0..64: q[row2, a2] * kt[a2, a1] -&gt; acc0__ar2
+    for a2 in 0..64: q[row3, a2] * kt[a2, a1] -&gt; acc0__ar3
+    online softmax update
+</code></pre>
+<p>Each of those four loops owns a separate accumulator. The first seeder keyed the seed by the axis name, <code>a2</code>. When the second loop opened, the seeder reset all four siblings. Three rows collapsed to the same wrong value, the mean of <code>v</code>. The design note records this symptom. There is no saved failing dump from that run, so the design note is the record.</p>
+<p>The fix is ownership. <code>_accums_for_loop</code> (<code>ptxc/common.py:87</code>) walks the loop body and stops descending when a nested loop shadows the same axis name. <code>_emit_loop_seeds</code> (<code>ptxc/stmts.py:1395</code>) seeds only the accumulators that the loop instance owns. An accumulator with an explicit <code>Init</code> is seeded by that statement instead. The regression test is the accumulator-ownership unit test, and a01 is the end-to-end case. The lesson is that ownership is the architecture. A register is not merely a name; it belongs to a particular loop instance.</p>
+<p>Explicit <code>Init</code> is the other half of the rule. m02 declares its accumulators with a literal identity, so the seed is a statement inside the tile rather than an entry on a loop. The same ownership question applies: the seed belongs to the declaration that owns it. The compiler seeds explicit <code>Init</code> statements separately from loop-entry accumulators, and the tests cover both.</p>
+<h3 id="invariant-3-state-read-under-a-predicate-is-defined-unconditionally">Invariant 3: state read under a predicate is defined unconditionally</h3>
+<p>The reduction kernels fold state with a warp shuffle and a shared-memory tree. The shared tree needs a base address. The first compiler materialized that base at its first use. In the reduction, that use sits inside <code>if (lane == 0)</code>. Every other thread then used an undefined address, and the runner reported an illegal memory access.</p>
+<p>The fix is to define the state on the path that every thread takes. <code>_emit_smem_bases</code> (<code>ptxc/memory.py:51</code>) materializes every shared base in the prologue. <code>_emit_thread_helpers</code> (<code>ptxc/lower.py:680</code>) does the same for <code>lane</code>, <code>warp</code> and <code>thread_id</code>. The cache fill and its barrier also run before the over-provisioning guard, for the same reason: every thread in the block has to reach the barrier. The tests are the reduction kernels and the machinery test for nested axis bindings. The design note also records an axis-shadowing case: a sibling loop reusing <code>_fa</code> in the matmul froze a stale counter inside a hoisted expression and produced out-of-bounds <code>cp.async</code> destinations; the address cache is cleared per hoisted copy. The lesson is simple: define it before the branch, not inside either arm.</p>
+<h3 id="the-three-promises-together">The three promises together</h3>
+<p>The launch promise says which threads are active. The ownership promise says which register is live for a given loop instance. The initialization promise says which memory is defined for every thread that can reach it. A bug in any one of them produces plausible numbers or a runtime fault, not a compile error. That is why these three are the architecture and the rest is optimization.</p>
+<h2 id="4-the-performance-descent">4. The performance descent</h2>
+<p>With the three promises in place, the compiler was correct on the tested envelope. It was not fast.</p>
+<p>The method comes before the numbers. Warm is 10 warmup launches and 100 timed iterations. Cold is 0 warmup and 1 iteration, which is what the scoring harness sees. S1 is the main session; S2 and S3 are labeled rechecks. The runner reports a median, often quantized to 32 ns. Warm differences at or below one tick are noise. Cold differences need non-overlapping ranges or a median gap above 1.5 percent. Absolute numbers move with the runner clock: the same m02 binary measured 3.30 and 5.02 microseconds in two sessions while p00 and 2048 stayed near fixed. The matrix is interleaved, and every cell carries its session label.</p>
+<div class="table-wrap"><table class="benchmark">
+<thead>
+<tr>
+  <th>cell</th>
+  <th style="text-align:right">ours warm (us)</th>
+  <th style="text-align:right">ours cold (us)</th>
+  <th>note</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>a01</td>
+  <td style="text-align:right">27.136</td>
+  <td style="text-align:right">37.344</td>
+  <td>cached key tile, 16-lane dot</td>
+</tr>
+<tr>
+  <td>a02</td>
+  <td style="text-align:right">10.816</td>
+  <td style="text-align:right">22.688</td>
+  <td>32-lane dot</td>
+</tr>
+<tr>
+  <td>m01</td>
+  <td style="text-align:right">13.872</td>
+  <td style="text-align:right">26.656</td>
+  <td>3-stage <code>cp.async</code></td>
+</tr>
+<tr>
+  <td>m02</td>
+  <td style="text-align:right">3.296</td>
+  <td style="text-align:right">16.624</td>
+  <td>static tile, atomic</td>
+</tr>
+<tr>
+  <td>2048</td>
+  <td style="text-align:right">302.512</td>
+  <td style="text-align:right">338.560</td>
+  <td>large matmul</td>
+</tr>
+<tr>
+  <td>split-K</td>
+  <td style="text-align:right">115.424</td>
+  <td style="text-align:right">126.944</td>
+  <td>atomic split</td>
+</tr>
+<tr>
+  <td>1024 holdout</td>
+  <td style="text-align:right">70.208</td>
+  <td style="text-align:right">81.568</td>
+  <td>the one disclosed residual</td>
+</tr>
+</tbody>
+</table></div>
+<p class="table-caption">Table 2. Headline medians on the hosted RTX 5090 runner, measured 2026-10-27. Warm is 10 warmup plus 100 timed iterations per round; cold is one launch per round. Each value is the median of five interleaved rounds, except the m01 and m02 cold rows, which use ten. m01 cold is an S2 recheck; the other rows are S1. Absolute values are session-specific.</p>
+<h3 id="4-1-the-43x-matmul">4.1 The 43x matmul</h3>
+<p>m01 took 6024 microseconds in an early measurement on the local RTX 3050 when the reference was 141 to 200 microseconds. The compiler was correct on all 15 open problems. The SASS was not fast. The stage index <code>((_ks / 64) % 3)</code> had been lowered as a 64-bit remainder. ptxas expands a 64-bit remainder by a small constant into an out-of-line call, <code>CALL.REL.NOINC $__cuda_sm20_rem_s64</code>, and that call sat in the innermost loop four times per iteration.</p>
+<p>The fix was 32-bit index arithmetic. <code>idx32</code> (<code>ptxc/expr.py:501</code>) compiles an index expression into one 32-bit register, matching the C <code>int</code> coordinates in Emmy's renderer. The runner caps buffers at 2^26 elements, so 32-bit arithmetic is exact. <code>rem.s32</code> inlines to a multiply-high sequence. The working log records the local result as 6024 to 206 microseconds on the RTX 3050, about 29 times faster, and the hosted result as 584 to 41.6 microseconds on the RTX 5090, about 14 times faster. The final m01 warm median is 13.872 microseconds after the rest of the stack.</p>
+<pre data-lang="text"><code class="language-text">before: rem.s64  -&gt; CALL.REL.NOINC $__cuda_sm20_rem_s64
+after:  rem.s32  -&gt; multiply-high sequence, inline
+</code></pre>
+<p>The before and after shape is the whole lesson. The 64-bit remainder became an out-of-line call in the hot loop; the 32-bit remainder inlined.</p>
+<p>The lesson is to read the machine code. A high-level theory about the schedule would not have found this. The disassembly did.</p>
+<figure class="sketch">
+  <div class="paper">
+    <svg class="sketch-svg" viewBox="0 0 1000 500" role="img" aria-labelledby="matmul-43x-title matmul-43x-desc" xmlns="http://www.w3.org/2000/svg">
+<title id="matmul-43x-title">The 43x detour, sketched</title>
+<desc id="matmul-43x-desc">A hand-drawn before and after flowchart. The old path goes from the stage index to a 64-bit remainder, an out-of-line CALL.REL.NOINC four times per inner loop, and 6024 microseconds on the local RTX 3050; a red X marks the call. The fix goes through idx32 and a 32-bit remainder to an inline multiply-high and 206 microseconds on the local RTX 3050, 41.6 on the hosted RTX 5090. The 43x rail is the first working compiler&#x27;s local time against the reference&#x27;s fast end, not the fix&#x27;s speedup.</desc>
+<style>
+.sketch-svg text { font-family: "Kalam", "Comic Sans MS", cursive; fill: currentColor; text-transform: none; }
+.sketch-svg .mono { font-family: "Fira Mono", "Cascadia Mono", Consolas, monospace; }
+.sketch-svg .ink { color: #1e1e1e; }
+.sketch-svg .accent { color: #a93b2f; }
+.sketch-svg .blue { color: #2b5f8a; }
+.sketch-svg .muted { color: #7a7366; }
+.sketch-svg .red { color: #c0392b; }
+</style>
+<text x="48" y="48" font-size="32" text-anchor="start" font-weight="400" class="ink">the 43x detour</text>
+<path d="M 48.5 62.0 Q 223.9 62.1 400.0 62.1" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="accent" opacity="0.96"/>
+<text x="48" y="82" font-size="15" text-anchor="start" font-weight="400" class="muted">the compiler was correct. the machine code was not fast.</text>
+<polygon points="947.3,92.0 945.9,101.8 939.9,111.1 930.3,119.2 916.5,124.4 901.9,128.4 886.0,129.4 869.8,129.1 854.8,125.1 842.9,118.4 831.4,111.3 825.1,102.0 823.7,92.0 825.9,82.1 833.0,73.2 842.9,65.6 855.0,59.1 870.2,55.9 886.0,54.4 901.9,55.6 916.5,59.6 929.8,65.2 939.6,73.0 946.6,82.0" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round" class="accent" opacity="0.94"/>
+<polygon points="948.0,92.0 946.2,101.9 939.7,111.0 930.1,119.0 917.0,124.9 901.9,128.4 886.0,130.7 869.7,129.4 854.6,125.3 841.8,119.1 832.7,110.9 826.7,101.7 824.5,92.0 827.0,82.3 831.8,72.8 842.3,65.2 854.6,58.7 870.0,55.4 886.0,53.4 902.2,54.8 916.4,59.7 929.4,65.4 940.5,72.7 945.8,82.2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round" class="accent" opacity="0.35"/>
+<text x="886" y="114" font-size="58" text-anchor="middle" font-weight="700" class="accent">43x</text>
+<text x="886" y="142" font-size="10" text-anchor="middle" font-weight="400" class="muted">first vs ref fast end</text>
+<text x="48" y="140" font-size="13" text-anchor="start" font-weight="400" class="muted">old path</text>
+<path d="M 47.5 150.2 Q 138.5 149.9 228.3 149.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 228.6 150.3 Q 227.5 177.8 227.5 205.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 228.4 205.6 Q 137.6 205.5 48.1 205.9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 47.6 206.2 Q 47.7 178.3 47.5 149.9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="58" y="174" font-size="12" text-anchor="start" font-weight="400" class="muted">stage index</text>
+<text x="58" y="192" font-size="15" text-anchor="start" font-weight="400" class="ink mono">((_ks / 64) % 3)</text>
+<path d="M 228.6 178.4 Q 240.7 177.7 253.8 178.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<polygon points="264.0,178.0 254.0,182.5 254.0,173.5" fill="currentColor" stroke="none" class="ink"/>
+<path d="M 264.4 150.2 Q 318.7 149.9 373.5 150.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 374.3 149.8 Q 373.7 177.7 373.8 205.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 373.7 206.1 Q 318.5 206.1 263.8 205.9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 264.1 206.4 Q 264.5 178.0 263.6 149.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="319" y="184" font-size="18" text-anchor="middle" font-weight="400" class="ink mono">rem.s64</text>
+<path d="M 373.7 177.6 Q 387.5 178.4 400.3 178.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<polygon points="410.0,178.0 400.0,182.5 400.0,173.5" fill="currentColor" stroke="none" class="ink"/>
+<path d="M 410.5 150.1 Q 499.7 150.5 589.9 149.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 589.7 150.2 Q 589.5 178.5 589.7 206.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 589.6 206.3 Q 500.1 205.8 409.5 205.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 410.1 205.7 Q 410.1 178.4 410.5 149.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="420" y="174" font-size="14" text-anchor="start" font-weight="400" class="ink mono">CALL.REL.NOINC</text>
+<text x="420" y="192" font-size="11" text-anchor="start" font-weight="400" class="muted">out-of-line, 4x per loop</text>
+<path d="M 569.9 155.5 Q 579.8 165.9 589.6 175.8" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="red" opacity="0.96"/>
+<path d="M 589.8 156.5 Q 580.0 165.9 570.6 176.2" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="red" opacity="0.96"/>
+<path d="M 589.6 177.4 Q 603.2 178.1 615.4 178.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<polygon points="626.0,178.0 616.0,182.5 616.0,173.5" fill="currentColor" stroke="none" class="ink"/>
+<path d="M 625.4 150.2 Q 701.2 150.5 776.0 150.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 775.5 150.1 Q 775.8 178.5 776.3 206.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 776.4 206.5 Q 701.3 206.2 625.8 206.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 625.9 206.3 Q 626.4 178.4 626.4 150.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="701" y="182" font-size="20" text-anchor="middle" font-weight="400" class="ink mono">6024 us</text>
+<text x="701" y="200" font-size="11" text-anchor="middle" font-weight="400" class="muted">local RTX 3050</text>
+<rect x="40" y="260" width="760" height="90" fill="#e9f0f7" stroke="none"/>
+<path d="M 150.1 206.1 Q 132.7 235.5 114.6 265.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="blue" opacity="0.96"/>
+<polygon points="110.0,274.0 111.2,263.1 118.9,267.7" fill="currentColor" stroke="none" class="blue"/>
+<text x="48" y="273" font-size="13" text-anchor="start" font-weight="400" class="blue">fix</text>
+<path d="M 48.3 279.9 Q 138.5 280.4 228.3 280.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 227.5 280.3 Q 227.9 308.4 227.4 336.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 228.2 336.0 Q 138.0 335.7 48.1 336.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 47.8 336.2 Q 47.7 307.5 47.6 279.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<text x="58" y="304" font-size="15" text-anchor="start" font-weight="400" class="blue mono">idx32</text>
+<text x="58" y="322" font-size="11" text-anchor="start" font-weight="400" class="muted">32-bit index</text>
+<path d="M 227.9 308.5 Q 241.5 308.2 253.8 308.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="blue" opacity="0.96"/>
+<polygon points="264.0,308.0 254.0,312.5 254.0,303.5" fill="currentColor" stroke="none" class="blue"/>
+<path d="M 264.4 280.5 Q 318.7 279.9 374.5 279.9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 373.6 280.0 Q 374.1 307.8 374.4 336.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 373.7 335.6 Q 319.2 336.5 263.9 335.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 264.2 336.0 Q 263.7 307.9 263.8 280.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<text x="319" y="314" font-size="18" text-anchor="middle" font-weight="400" class="blue mono">rem.s32</text>
+<path d="M 373.5 307.4 Q 387.6 307.9 400.4 307.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="blue" opacity="0.96"/>
+<polygon points="410.0,308.0 400.0,312.5 400.0,303.5" fill="currentColor" stroke="none" class="blue"/>
+<path d="M 409.8 280.3 Q 500.2 280.1 589.4 279.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 590.4 279.7 Q 590.0 307.5 589.6 335.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 590.2 336.2 Q 500.1 335.9 410.4 336.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 410.0 335.6 Q 410.2 307.7 409.4 280.0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<text x="420" y="306" font-size="12" text-anchor="start" font-weight="400" class="blue mono">multiply-high, inline</text>
+<text x="420" y="324" font-size="11" text-anchor="start" font-weight="400" class="muted">no call</text>
+<path d="M 589.7 307.8 Q 603.3 307.6 616.2 308.0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="blue" opacity="0.96"/>
+<polygon points="626.0,308.0 616.0,312.5 616.0,303.5" fill="currentColor" stroke="none" class="blue"/>
+<path d="M 625.9 280.4 Q 701.1 280.3 776.5 279.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 775.6 279.9 Q 776.5 308.2 776.2 336.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 776.5 336.4 Q 700.9 336.1 626.5 336.0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 626.3 336.4 Q 626.2 307.7 626.2 280.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<text x="701" y="312" font-size="20" text-anchor="middle" font-weight="400" class="blue mono">206 us</text>
+<text x="701" y="330" font-size="11" text-anchor="middle" font-weight="400" class="muted">RTX 3050 / 41.6 RTX 5090</text>
+<text x="48" y="420" font-size="18" text-anchor="start" font-weight="400" class="ink">the python was correct. the sass was slow.</text>
+<text x="48" y="448" font-size="18" text-anchor="start" font-weight="400" class="accent">read the machine code.</text>
+</svg>
+  </div>
+  <figcaption>Figure 4. The 43x detour, sketched: the 64-bit remainder expanded into an out-of-line call in the inner loop; 32-bit index arithmetic kept the remainder inline. The 43x rail is the ratio of the first working compiler's local time to the reference's fast end, not the speedup this fix delivered.</figcaption>
+  <p class="sr-only">Alt text: A hand-drawn before and after flowchart. The old path goes from the stage index to a 64-bit remainder, an out-of-line CALL.REL.NOINC four times per inner loop, and 6024 microseconds on the local RTX 3050; a red X marks the call. The fix goes through idx32 and a 32-bit remainder to an inline multiply-high and 206 microseconds on the local RTX 3050, 41.6 on the hosted RTX 5090. The 43x rail is the ratio of the first working compiler's local time to the reference's fast end, not the fix's speedup.</p>
+</figure>
+
+<h3 id="4-2-launch-bounds">4.2 Launch bounds</h3>
+<p>The attention kernels are latency-bound with one block per SM. Without <code>.maxntid</code>, ptxas budgets registers for a 1024-thread block. a02 was capped at 56 registers. Emitting the real block size raised the budget to 80 registers at that point and cut the warm time from 43.7 to 25.2 microseconds. The working log records the a02 budget as 56 before and 80 after; the 80 is a02's ptxas budget, while the 255 in the four-dot row is a different kernel's budget. The line is one string in <code>_signature</code> (<code>ptxc/lower.py:627</code>):</p>
+<pre data-lang="ptx"><code class="language-ptx">.maxntid 32, 1, 1
+</code></pre>
+<p>That is the a02 block size; a01's is 128. The point is the same: the launch descriptor already knows the block size, so the compiler should tell ptxas instead of letting it assume the worst case. The lesson is that an assumption can be the bottleneck. No instruction was removed. The register budget changed.</p>
+<h3 id="4-3-the-tile-cache">4.3 The tile cache</h3>
+<p>A block of attention re-reads the whole key tile from global memory for every key. The tile is 16 KiB, so it fits in shared memory. One cooperative fill, transposed when the dot axis is the leading coordinate, replaces thousands of global loads with 128-bit shared loads.</p>
+<p>The transposed fill is the part that is easy to get wrong. The fill reads four consecutive keys from one source row. Those four keys land on four shared rows, so the store stride is the row extent of <code>a2</code>, not 1. The first version wrote <code>+j</code> and broke the answer. The open set caught it.</p>
+<p>The results in the experiment session were a01 warm 49.8 to 25.2 microseconds, and a02 from its own 25.2 pre-cache baseline to 13.0 microseconds. The final S1 medians are 27.136 and 10.816; the sessions differ and the rest of the stack landed later. The cache commit recorded 27.3 microseconds for a01; the experiment log recorded 25.2 in its session; the final S1 median is 27.136. I report all three.</p>
+<figure class="diagram"><div class="diagram-scroll"><pre data-lang="text"><code class="language-text">source kt row a2:  [k0] [k1] [k2] [k3]
+                    |    |    |    |
+                    v    v    v    v
+shared __cache_kt: row0 row1 row2 row3
+element offset:      0   64  128  192
+
+wrong inset:  store at flat + j    -&gt; four consecutive slots
+right:        store at flat + j*a2 -&gt; four shared rows
+</code></pre></div><figcaption>Figure 5. Four consecutive keys from one source row become four shared rows, so the store stride is the row extent of a2 (64 here), not 1.</figcaption><p class="sr-only">Alt text: A diagram of a source row with four consecutive keys mapped to four shared rows. The element offsets are 0, 64, 128, and 192. An inset shows the wrong stride of 1 writing four consecutive slots.</p></figure>
+<pre data-lang="ptx"><code class="language-ptx">// a01 decode: one gid becomes four axes
+div.u32 %r7, %r6, 256;
+rem.u32 %r8, %r7, 2;
+div.u32 %r9, %r6, 128;
+rem.u32 %r10, %r9, 2;
+div.u32 %r11, %r6, 16;
+rem.u32 %r12, %r11, 8;
+rem.u32 %r13, %r6, 16;
+
+// transposed kt fill: four keys, four shared rows
+shr.u32 %r23, %r22, 6;      // column
+and.b32 %r24, %r22, 63;     // row
+mad.lo.s32 %r25, %r24, 64, %r23;
+st.shared.f32 [%r26], %f5;
+add.s32 %r29, %r25, %r28;   // +64
+add.s32 %r33, %r25, %r32;   // +128
+add.s32 %r37, %r25, %r36;   // +192
+</code></pre>
+<p>The decode turns one <code>gid</code> into four axes. The transposed fill stores four consecutive keys into four shared rows with stride 64. The wrong <code>+j</code> stride would put all four keys in consecutive slots.</p>
+<p>The lesson is to derive the stride from the layout. Pattern-matching the source index gives <code>+j</code>; the shared layout gives <code>+j * a2</code>.</p>
+<h3 id="4-4-the-slice-cache">4.4 The slice cache</h3>
+<p>A large q does not fit whole. A block reads only its own rows, and those rows are contiguous because blocks partition the leading dimension. The fill starts at the block base, and the loads subtract the same base. The 256 by 128 attention shape went from 1434 to 947 microseconds warm. The selection ranks candidates by estimated instruction saving, so a small key tile wins when only one cache fits. The lesson is that the right cache is the one that fits the block's working set, not the one that fits the whole tensor.</p>
+<h3 id="4-5-the-warp-dot">4.5 The warp dot</h3>
+<p>In a one-row-per-warp schedule every lane computes the same score. The compiler splits the head axis across lanes: each lane sums <code>head / group</code> terms, then a butterfly shuffle adds the partials into every lane. The group is 16 for a01, because two rows share a warp, and 32 for a02, because the whole warp shares the dot.</p>
+<pre data-lang="ptx"><code class="language-ptx">shfl.sync.bfly.b32 %f45, %f36, 8, 0x1f, 0xffffffff;
+add.f32 %f36, %f36, %f45;
+shfl.sync.bfly.b32 %f46, %f36, 4, 0x1f, 0xffffffff;
+add.f32 %f36, %f36, %f46;
+shfl.sync.bfly.b32 %f47, %f36, 2, 0x1f, 0xffffffff;
+add.f32 %f36, %f36, %f47;
+shfl.sync.bfly.b32 %f48, %f36, 1, 0x1f, 0xffffffff;
+add.f32 %f36, %f36, %f48;
+</code></pre>
+<p>For a01's 16-lane group, the four shuffles and adds are the whole reduction; a02's 32-lane group uses five. The full mask keeps the shuffle inside the active warp.</p>
+<p>The results were a02 warm 13.0 to 10.9 microseconds and the 256 by 128 shape warm 947 to 257 microseconds. a01 did not improve when its dot became cooperative: 25.25 warm before and after. That is a useful negative result. The online-softmax dependency chain and the shuffle tree are its bound. Adding more machinery there would not address the bound. The lesson is that a negative result is data.</p>
+<figure class="diagram"><div class="diagram-scroll"><pre data-lang="text"><code class="language-text">lane:     0  1  2  3 ... 15
+slice:    head/16 each
+offset 8: lane i += lane i+8
+offset 4: lane i += lane i+4
+offset 2: lane i += lane i+2
+offset 1: lane i += lane i+1
+result:   every lane has the full dot
+</code></pre></div><figcaption>Figure 6. For a01, the dot is split across 16 lanes and folded with a four-step butterfly. Every lane ends with the full sum, so the softmax update needs no shared-memory broadcast.</figcaption><p class="sr-only">Alt text: A butterfly diagram for a01's 16-lane group, with offsets 8, 4, 2, and 1, each step adding a partner lane's partial sum.</p></figure>
+<h3 id="4-6-the-m01-pipeline">4.6 The m01 pipeline</h3>
+<p>m01 is a three-stage <code>cp.async</code> pipeline. Each stage copies one a slab and two b slabs into shared memory, commits the group, and then waits until at most two groups are in flight. The inner loop is 64 steps, fully unrolled, with literal shared offsets.</p>
+<figure class="diagram"><div class="diagram-scroll"><pre data-lang="text"><code class="language-text">stage 0: cp.async a0, b0, b1 -&gt; commit
+stage 1: cp.async a1, b1, b2 -&gt; commit
+for _ks in 0..8:
+  cp.async next stage -&gt; commit
+  wait_group 2
+  bar.sync
+  64-step unrolled inner: 4 FMA per step
+  bar.sync
+</code></pre></div><figcaption>Figure 7. The matmul keeps three stages in flight. Two prologue stages and eight loop stage copies, three <code>cp.async</code> copies per group, <code>wait_group 2</code>, and two barriers per stage, one before and one after the inner loop, turn global latency into a pipeline; the 64-step inner loop is fully unrolled with literal shared offsets.</figcaption><p class="sr-only">Alt text: A three-stage <code>cp.async</code> pipeline with two prologue stages and eight loop stage copies, three copies per stage, commit groups, <code>wait_group 2</code>, two barriers per stage, and a 64-step unrolled inner loop.</p></figure>
+<pre data-lang="ptx"><code class="language-ptx">cp.async.cg.shared.global [%r138], [%rd20], 16;
+cp.async.cg.shared.global [%r148], [%rd22], 16;
+cp.async.cg.shared.global [%r158], [%rd24], 16;
+cp.async.commit_group;
+cp.async.wait_group 2;
+bar.sync 0;
+ld.shared.v2.f32 {%f5, %f6}, [%r164];
+ld.shared.f32 %f7, [%r167];
+fma.rn.f32 %f1, %f5, %f7, %f1;
+fma.rn.f32 %f2, %f6, %f7, %f2;
+fma.rn.f32 %f3, %f5, %f8, %f3;
+fma.rn.f32 %f4, %f6, %f8, %f4;
+</code></pre>
+<p>Three <code>cp.async</code> copies fill the next stage; <code>wait_group 2</code> leaves two groups in flight; the inner loop reads the shared tile with vector and scalar shared loads and four FMAs per step. This listing is an excerpt. At the <code>LDS.64</code> fusion, the 1024 vector loads were across the 64-step unrolled loop, 16 per step; the final m01 after the <code>cp.async</code> pipeline has 512 <code>ld.shared.v2.f32</code> and 1024 <code>ld.shared.f32</code>. The table's 1024-vector count is the fusion's measured effect, not the final static count.</p>
+<h3 id="4-7-the-supporting-changes">4.7 The supporting changes</h3>
+<p>The first five mechanisms in this section carried the main gains. The m01 pipeline composes them, and the rest were supporting changes, each with a measured effect and a regression risk.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+  <th>change</th>
+  <th>what changed</th>
+  <th>measured effect</th>
+  <th>risk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>load batching, query-row registers</td>
+  <td>issue a group's loads before its arithmetic; keep the attention query row in registers across the key loop</td>
+  <td>a02 45.7 to 43.7 at the time; the mechanism makes the later cache work effective</td>
+  <td>register pressure; the hoist cap is 64 live values</td>
+</tr>
+<tr>
+  <td><code>LDS.64</code> fusion</td>
+  <td>fuse same-row column pairs and k-adjacent pairs across unrolled copies</td>
+  <td>m01 21.1 to 15.0; at that point the inner loop went from 1024 scalar shared loads to 1024 vector loads</td>
+  <td>alignment; a wrong pair is a misaligned access</td>
+</tr>
+<tr>
+  <td>literal-axis folding, dominating literal block</td>
+  <td>evaluate unrolled axis math at compile time; materialize <code>s32</code> literals ahead of the body</td>
+  <td>m01 SASS 3233 to 3097; m02 PTX 231 to 171</td>
+  <td>a partial-unroll copy is <code>base + k</code>, not <code>k</code>; a shadowing loop hides the outer literal</td>
+</tr>
+<tr>
+  <td>exact-launch guard elision</td>
+  <td>remove the <code>gid &lt; N</code> comparison when the launch covers the tile exactly</td>
+  <td>one predicate and branch removed; m02 outliers gone</td>
+  <td>over-provisioned launches must keep the guard</td>
+</tr>
+<tr>
+  <td>affine address CSE, gated at 512 tiles</td>
+  <td>reuse a global address with an immediate offset</td>
+  <td>k17 warm 6.69 to 4.64; SASS 417 to 367</td>
+  <td>the 64x48 (256-tile) attention shape regresses if the cache is unconditional</td>
+</tr>
+<tr>
+  <td>shift/mask decode, gated at 1024 tiles</td>
+  <td>use shifts and masks when strides and extents are powers of two</td>
+  <td>2048 SASS 2201 to 2039; split-K 1688 to 1593</td>
+  <td>small attention blocks schedule worse with the short form</td>
+</tr>
+<tr>
+  <td>single-trip copies, bounded unroll</td>
+  <td>turn a one-step strided loop into a guarded body; unroll with a tail guard</td>
+  <td>m02 SASS 369 to 142; 2048 SASS 2122 to 1931</td>
+  <td>code size and tail correctness</td>
+</tr>
+<tr>
+  <td>four-wide shared fusion, divmod recombination</td>
+  <td>fuse up to four aligned shared loads; fold copy-destination divide and remainder</td>
+  <td>2048 <code>LDS.128</code> 80 to 112; split-K warm 117.5 to 115.6</td>
+  <td>alignment; address algebra</td>
+</tr>
+<tr>
+  <td>lane fold, gated at fan-out 2</td>
+  <td>fold lanes only when the fan-out is low</td>
+  <td>split-K 115.6 and 2048 302.5 in one tree</td>
+  <td>2048 regresses to 307.9 if the fold is unconditional</td>
+</tr>
+<tr>
+  <td>all-shared unroll by 16</td>
+  <td>unroll long all-shared loops by 16</td>
+  <td>128 holdout warm 6.688 to 4.672; cold 18.032 to 16.608</td>
+  <td>code size; only the 128 holdout loop qualifies</td>
+</tr>
+</tbody>
+</table></div>
+<p class="table-caption">Table 3. Supporting changes, their measured effects and their regression risks. Times are warm medians from the optimization session unless the row says cold; SASS and PTX numbers are static counts, not times. The gates are static thresholds, not learned models.</p>
+<p>The all-shared unroll is a gate that is a property, not a shape name. The compiler unrolls a loop longer than 64 iterations by 16 when every load in the body is from shared memory and the expanded body stays under the cap. The 4 variant did not close the 128 holdout; 8 was 16.96 cold; 16 was 16.61 and won both modes. The gate is derived from the loop body, not from a list of known cells.</p>
+<p>Every change in this section was one I expected to keep.</p>
+<h2 id="5-what-the-machine-rejected-gated-or-kept">5. What the machine rejected, gated, or kept</h2>
+<p>These are the ones that did not survive as proposed.</p>
+<div class="table-wrap"><table class="rejected">
+<thead>
+<tr>
+  <th>change</th>
+  <th>measurement</th>
+  <th>decision</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>four-dot attention fusion</td>
+  <td>540 lines and 42 loads instead of 680 and 66; ptxas dropped from 255 to 96 registers; the kernel doubled to about 95 us</td>
+  <td>rejected</td>
+</tr>
+<tr>
+  <td><code>LDS.128</code> widening on a01</td>
+  <td>a01 49.8 to 53.9 at its pre-cache baseline</td>
+  <td>rejected</td>
+</tr>
+<tr>
+  <td><code>cp.async</code> address split</td>
+  <td>26 to 3 wide multiplies, no measurable timing change</td>
+  <td>removed</td>
+</tr>
+<tr>
+  <td>general shared-address cache</td>
+  <td>2048 302 to 316</td>
+  <td>rejected</td>
+</tr>
+<tr>
+  <td>unconditional lane fold</td>
+  <td>2048 302 to 307.9</td>
+  <td>gated at fan-out 2</td>
+</tr>
+<tr>
+  <td>all-shared unroll by 4 or 8</td>
+  <td>4 was 18.18 cold against its 17.63 baseline; 8 was 16.96 cold</td>
+  <td>16 kept, 16.61 cold against its 18.032 baseline</td>
+</tr>
+<tr>
+  <td>affine index cancellation</td>
+  <td>1024 stayed 70.2; 2048 302.5 to 316.7</td>
+  <td>rejected</td>
+</tr>
+<tr>
+  <td>shift plus add to one <code>mad</code></td>
+  <td>128 holdout SASS 308 to 368</td>
+  <td>rejected</td>
+</tr>
+<tr>
+  <td>unconditional shift/mask decode</td>
+  <td>the 64x48 (256-tile) attention shape 37.60 to 39.55</td>
+  <td>gated at 1024 tiles</td>
+</tr>
+<tr>
+  <td>address cache on small attention tiles</td>
+  <td>the 64x48 (256-tile) attention shape 37.47 to 39.30</td>
+  <td>gated at 512 tiles</td>
+</tr>
+</tbody>
+</table></div>
+<p class="table-caption">Table 4. Rejected, reverted, and gated changes; the decision column names the kept alternative. Times are warm medians from the optimization session unless the row says cold; SASS numbers are instruction counts. A negative result is data; the table exists so the next person does not repeat the experiment.</p>
+<h3 id="the-four-dot-fusion">The four-dot fusion</h3>
+<p>The four-dot fusion looked right. a01 has four dot loops over the same <code>a2</code> axis and the same <code>kt</code> column. Fusing them would remove duplicate key-column loads: 540 lines and 42 loads instead of 680 and 66. The instruction count went down.</p>
+<p>The machine did not care. ptxas dropped the register budget from 255 to 96 registers, and the kernel doubled to about 95 microseconds in that session. The redundant loads were cheaper than the scheduling freedom they bought. The fused version had fewer instructions and less room to hide latency. That is the scheduling-freedom lesson in its purest form: a shorter kernel can be slower.</p>
+<h3 id="the-1024-holdout">The 1024 holdout</h3>
+<p>The 1024 by 1024 by 1024 holdout is the one disclosed residual. It runs at 70.208 microseconds warm and 81.568 cold. The hosted SASS is 1268 instructions on the RTX 5090 (sm_120, CUDA 12.9); the local SASS is 1240 from ptxas 12.6 targeting sm_89, and the local GPU is an RTX 3050 (sm_86). The holdout meta launches 88 blocks of 512 threads on a 170-SM GPU, so it runs less than one block per SM. The next work is the ptxas schedule, not a missing mechanism.</p>
+<p>The evidence here is an instruction count and a launch shape, not a committed SASS file. The private audit recomputed 45 wins, 42 ties and 1 loss from a CSV that carried the reference medians. The public CSV carries the absolute medians, not the reference column, so the 45/42/1 verdict is private-audit evidence. The absolute numbers are the public evidence.</p>
+<figure class="sketch">
+  <div class="paper">
+    <svg class="sketch-svg" viewBox="0 0 1000 600" role="img" aria-labelledby="optimization-loop-title optimization-loop-desc" xmlns="http://www.w3.org/2000/svg">
+<title id="optimization-loop-title">The optimization loop, sketched</title>
+<desc id="optimization-loop-desc">A hand-drawn decision loop. One idea goes to emit, count the SASS, and an interleaved A/B. A win or tie is kept and loops back. A regression is checked for locality: a local regression is gated, a non-local one is reverted by a dashed return. Only the gate is filled. Four sticky notes list the four-dot fusion, the general address cache, the lane fold, and the LDS.128 widening.</desc>
+<style>
+.sketch-svg text { font-family: "Kalam", "Comic Sans MS", cursive; fill: currentColor; text-transform: none; }
+.sketch-svg .mono { font-family: "Fira Mono", "Cascadia Mono", Consolas, monospace; }
+.sketch-svg .ink { color: #1e1e1e; }
+.sketch-svg .accent { color: #a93b2f; }
+.sketch-svg .blue { color: #2b5f8a; }
+.sketch-svg .muted { color: #7a7366; }
+.sketch-svg .red { color: #c0392b; }
+</style>
+<text x="48" y="48" font-size="30" text-anchor="start" font-weight="400" class="ink">how a change survived</text>
+<path d="M 48.2 62.4 Q 193.6 62.3 339.6 61.7" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="accent" opacity="0.96"/>
+<text x="48" y="82" font-size="15" text-anchor="start" font-weight="400" class="muted">the loop behind the keeps, the gates, and the reverts.</text>
+<path d="M 48.3 149.6 Q 107.6 149.7 168.0 149.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 168.4 150.1 Q 167.8 174.9 167.4 199.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 168.4 200.4 Q 107.6 200.4 48.4 200.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 47.7 200.4 Q 48.5 175.3 48.0 150.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="108" y="181" font-size="15" text-anchor="middle" font-weight="400" class="ink">one idea</text>
+<path d="M 167.8 174.9 Q 179.1 174.9 189.8 174.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<polygon points="200.0,175.0 190.0,179.5 190.0,170.5" fill="currentColor" stroke="none" class="ink"/>
+<path d="M 200.6 150.2 Q 260.4 150.3 320.1 150.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 319.9 149.6 Q 319.6 175.2 319.6 200.0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 320.1 199.9 Q 259.7 200.0 199.6 200.0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 199.6 199.8 Q 199.7 174.7 199.5 150.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="260" y="181" font-size="15" text-anchor="middle" font-weight="400" class="ink">emit it</text>
+<path d="M 320.3 175.5 Q 331.5 174.9 341.5 174.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<polygon points="352.0,175.0 342.0,179.5 342.0,170.5" fill="currentColor" stroke="none" class="ink"/>
+<path d="M 352.2 149.6 Q 422.3 150.4 491.9 150.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 491.6 150.4 Q 492.4 175.3 491.8 200.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 492.1 200.3 Q 421.6 200.5 351.7 200.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 351.8 200.3 Q 352.1 175.1 351.8 149.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="422" y="181" font-size="14" text-anchor="middle" font-weight="400" class="ink">count the sass</text>
+<path d="M 491.5 174.7 Q 502.6 175.2 513.5 175.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<polygon points="524.0,175.0 514.0,179.5 514.0,170.5" fill="currentColor" stroke="none" class="ink"/>
+<path d="M 523.4 149.9 Q 604.1 150.0 683.8 149.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 683.5 149.8 Q 683.5 175.5 683.7 200.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 683.8 200.4 Q 603.5 200.0 523.4 199.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 524.0 200.0 Q 524.0 175.5 524.2 149.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="604" y="181" font-size="14" text-anchor="middle" font-weight="400" class="ink">interleaved a/b</text>
+<path d="M 684.5 200.3 Q 717.3 222.3 751.4 244.7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="ink" opacity="0.96"/>
+<polygon points="760.0,250.0 749.2,248.3 754.1,240.7" fill="currentColor" stroke="none" class="ink"/>
+<path d="M 760.1 249.8 Q 800.4 272.2 839.7 294.7" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 839.4 294.9 Q 799.6 317.3 759.5 340.3" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 760.3 339.6 Q 720.1 316.9 680.0 295.1" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 679.9 294.6 Q 719.8 272.2 760.4 249.5" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="760" y="301" font-size="15" text-anchor="middle" font-weight="400" class="ink">win or tie?</text>
+<path d="M 839.8 294.9 Q 865.4 294.7 889.4 294.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<polygon points="900.0,295.0 890.0,299.5 890.0,290.5" fill="currentColor" stroke="none" class="blue"/>
+<text x="850" y="312" font-size="14" text-anchor="start" font-weight="400" class="blue">keep</text>
+<text x="845" y="285" font-size="11" text-anchor="start" font-weight="400" class="blue">yes</text>
+<path d="M 900.5 295.6 Q 899.8 209.9 899.5 125.0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 899.8 125.5 Q 503.6 125.4 108.1 124.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 108.4 124.6 Q 107.4 132.2 108.0 139.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<polygon points="108.0,150.0 103.5,140.0 112.5,140.0" fill="currentColor" stroke="none" class="blue"/>
+<text x="520" y="114" font-size="12" text-anchor="middle" font-weight="400" class="blue">keep the win, try the next idea</text>
+<path d="M 759.7 340.3 Q 759.8 360.4 760.2 380.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="red" opacity="0.96"/>
+<polygon points="760.0,390.0 755.5,380.0 764.5,380.0" fill="currentColor" stroke="none" class="red"/>
+<text x="775" y="368" font-size="11" text-anchor="start" font-weight="400" class="red">no</text>
+<path d="M 759.9 390.1 Q 800.0 413.0 840.1 435.4" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 839.6 435.0 Q 800.5 457.0 760.4 480.0" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 759.8 479.5 Q 719.8 458.1 679.5 434.4" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 680.3 435.4 Q 720.3 412.0 760.6 390.4" fill="none" stroke="currentColor" stroke-width="2.0" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="760" y="441" font-size="15" text-anchor="middle" font-weight="400" class="ink">is it local?</text>
+<rect x="858" y="387" width="64" height="50" rx="5" fill="#00000016" stroke="none"/>
+<rect x="856" y="385" width="64" height="50" rx="5" fill="#dce8f5" stroke="none"/>
+<path d="M 856.4 385.3 Q 887.9 385.1 919.7 385.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 920.6 385.0 Q 919.6 409.8 919.7 435.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 919.4 434.7 Q 887.9 434.5 855.8 435.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<path d="M 856.4 434.9 Q 855.7 410.4 856.6 385.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<text x="888" y="416" font-size="14" text-anchor="middle" font-weight="400" class="ink">gate</text>
+<path d="M 840.0 435.5 Q 845.3 426.4 850.7 418.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="blue" opacity="0.96"/>
+<polygon points="856.0,410.0 854.4,420.8 846.8,416.0" fill="currentColor" stroke="none" class="blue"/>
+<text x="846" y="452" font-size="11" text-anchor="start" font-weight="400" class="blue">yes</text>
+<path d="M 759.6 480.1 Q 759.9 485.0 759.4 490.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="6 6" class="red" opacity="0.96"/>
+<path d="M 760.1 489.8 Q 403.7 489.6 48.5 490.0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="6 6" class="red" opacity="0.96"/>
+<path d="M 47.7 490.3 Q 48.0 350.4 48.2 209.9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="6 6" class="red" opacity="0.96"/>
+<polygon points="48.0,200.0 52.5,210.0 43.5,210.0" fill="currentColor" stroke="none" class="red"/>
+<text x="650" y="480" font-size="14" text-anchor="start" font-weight="400" class="red">revert</text>
+<text x="735" y="480" font-size="11" text-anchor="start" font-weight="400" class="red">no</text>
+<g transform="rotate(0 148.0 535.0)">
+<rect x="50" y="502" width="200" height="70" rx="2" fill="#00000018" stroke="none"/>
+<rect x="48" y="500" width="200" height="70" rx="2" fill="#f2dce0" stroke="none"/>
+<path d="M 48.4 499.6 Q 148.5 499.5 248.4 499.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 248.5 499.7 Q 247.5 535.0 248.0 570.1" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 247.4 569.9 Q 147.7 570.0 48.3 569.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 48.2 569.9 Q 47.7 534.5 48.5 500.3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="60" y="524" font-size="13" text-anchor="start" font-weight="400" class="ink">four-dot fusion</text>
+<text x="60" y="540" font-size="12" text-anchor="start" font-weight="400" class="ink">255 -&gt; 96 regs</text>
+<text x="60" y="556" font-size="12" text-anchor="start" font-weight="400" class="ink">~95 us / revert</text>
+</g>
+<g transform="rotate(0 372.0 535.0)">
+<rect x="274" y="502" width="200" height="70" rx="2" fill="#00000018" stroke="none"/>
+<rect x="272" y="500" width="200" height="70" rx="2" fill="#f2dce0" stroke="none"/>
+<path d="M 272.5 500.4 Q 371.6 500.5 472.4 500.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 472.1 499.7 Q 472.2 535.2 471.6 570.3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 472.2 570.1 Q 372.1 569.5 272.0 570.3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 272.4 570.0 Q 272.4 534.9 272.1 499.9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="284" y="524" font-size="13" text-anchor="start" font-weight="400" class="ink">general address cache</text>
+<text x="284" y="540" font-size="12" text-anchor="start" font-weight="400" class="ink">2048 302 -&gt; 316</text>
+<text x="284" y="556" font-size="12" text-anchor="start" font-weight="400" class="ink">revert</text>
+</g>
+<g transform="rotate(0 596.0 535.0)">
+<rect x="498" y="502" width="200" height="70" rx="2" fill="#00000018" stroke="none"/>
+<rect x="496" y="500" width="200" height="70" rx="2" fill="#dce8f5" stroke="none"/>
+<path d="M 496.5 499.8 Q 596.5 499.9 696.2 500.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 695.5 500.0 Q 696.2 534.9 695.9 570.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 695.9 569.9 Q 596.3 570.5 496.1 570.3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 495.6 569.8 Q 495.5 534.7 495.8 500.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="508" y="524" font-size="13" text-anchor="start" font-weight="400" class="ink">lane fold</text>
+<text x="508" y="540" font-size="12" text-anchor="start" font-weight="400" class="ink">2048 302 -&gt; 307.9</text>
+<text x="508" y="556" font-size="12" text-anchor="start" font-weight="400" class="ink">gate at fan-out 2</text>
+</g>
+<g transform="rotate(0 820.0 535.0)">
+<rect x="722" y="502" width="200" height="70" rx="2" fill="#00000018" stroke="none"/>
+<rect x="720" y="500" width="200" height="70" rx="2" fill="#f2dce0" stroke="none"/>
+<path d="M 719.8 499.6 Q 819.7 500.5 920.6 499.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 919.5 499.9 Q 919.6 534.6 919.7 569.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 919.5 569.7 Q 819.5 570.2 720.1 570.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<path d="M 720.2 570.4 Q 720.2 535.2 720.4 499.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" class="ink" opacity="0.96"/>
+<text x="732" y="524" font-size="13" text-anchor="start" font-weight="400" class="ink">LDS.128</text>
+<text x="732" y="540" font-size="12" text-anchor="start" font-weight="400" class="ink">a01 49.8 -&gt; 53.9</text>
+<text x="732" y="556" font-size="12" text-anchor="start" font-weight="400" class="ink">revert</text>
+</g>
+</svg>
+  </div>
+  <figcaption>Figure 8. The optimization loop, sketched: measure, keep, gate, or revert. The rejected experiments are part of the method, not a footnote.</figcaption>
+  <p class="sr-only">Alt text: A hand-drawn decision loop. One idea goes to emit, count the SASS, and an interleaved A/B. A win or tie is kept. A regression is checked for locality: a local regression is gated, a non-local one is reverted. Four sticky notes list the four-dot fusion, the general address cache, the lane fold, and the LDS.128 widening.</p>
+</figure>
+
+<h2 id="6-verification-and-the-public-artifact">6. Verification and the public artifact</h2>
+<p>The rejects were useful, but they did not prove the artifact.</p>
+<p>The verification ladder has layers. The counts below are from the public verification record and the final audit.</p>
+<div class="table-wrap"><table class="verification">
+<thead>
+<tr>
+  <th>layer</th>
+  <th>result</th>
+  <th>what it proves</th>
+  <th>what it does not</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>unit tests</td>
+  <td>92/92 (35 lowering, 44 machinery, 9 CLI, 3 determinism, 1 no-external)</td>
+  <td>the alignment proof, the stride rules, the strict meta contract and determinism</td>
+  <td>an arbitrary hidden shape</td>
+</tr>
+<tr>
+  <td>checked-in variants</td>
+  <td>46/46</td>
+  <td>the generator's shapes and dtypes</td>
+  <td>a shape the generator cannot express</td>
+</tr>
+<tr>
+  <td>generated corpus</td>
+  <td>86/86 IRs in 85 packages</td>
+  <td>the same constructs across 13 generated directories</td>
+  <td>an unseen configuration</td>
+</tr>
+<tr>
+  <td>local IR sweep</td>
+  <td>147/147 compile</td>
+  <td>the compiler does not crash on the local corpus</td>
+  <td>numerical correctness on every case</td>
+</tr>
+<tr>
+  <td>holdout</td>
+  <td>8/8</td>
+  <td>the holdout shapes generated from the public spec</td>
+  <td>the full hidden set</td>
+</tr>
+<tr>
+  <td>hosted runner</td>
+  <td>15/15 twice</td>
+  <td>the actual ptxas and GPU on the open problems</td>
+  <td>a hidden problem with a new edge</td>
+</tr>
+<tr>
+  <td>benchmark matrix</td>
+  <td>88 cells</td>
+  <td>the absolute medians and the disclosed residual</td>
+  <td>the reference column, which is not public</td>
+</tr>
+</tbody>
+</table></div>
+<p class="table-caption">Table 5. The verification ladder. Each layer proves something the layer below it cannot, and none of them proves an arbitrary hidden shape.</p>
+<p>The 92 count is the size of the suite, not the number that runs in a cold clone without the task checkout. Five lowering tests and 37 machinery tests skip without the task repository; the audit ran them with the checkout present. The 85 packages contain 86 IRs because one package, the two-kernel bias and relu case, has two IRs.</p>
+<p>The strict metadata story is the one I would tell a reviewer. The old compiler invented a launch when <code>meta.json</code> was missing. The audit found it with four probes: baseline, missing <code>meta.json</code>, missing <code>grid</code>/<code>block</code>, and missing <code>arg_order</code>. All four exited 0. The public fix requires <code>meta.json</code>, <code>grid</code>, <code>block</code>, <code>args</code> and <code>arg_order</code>. Missing or malformed input exits 1 with no PTX.</p>
+<pre data-lang="python"><code class="language-python">path = os.path.join(os.path.dirname(os.path.abspath(ir_path)), &quot;meta.json&quot;)
+if os.path.exists(path):
+    ...
+    for kernel in kernels:
+        if kernel.get(&quot;entry&quot;) == entry:
+            return kernel
+    raise CompileError(
+        f&quot;meta.json has no kernel named {entry!r}; entries: {names}&quot;)
+return None
+
+...
+meta = find_meta(ir_path, kernel_op.name)
+if meta is None:
+    raise CompileError(
+        f&quot;meta.json not found next to {ir_path}; the launch descriptor is required&quot;)
+</code></pre>
+<p>The compiler looks for <code>meta.json</code> next to the IR, matches the kernel entry, and raises when the file or the entry is missing. The CLI prints the error to stderr and exits 1 with no PTX.</p>
+<p>A compiler that invents a launch is not being helpful. It is hiding a broken package.</p>
+<p>The CSV has no reference column and no cleanup-baseline column; the BENCHMARKS tables carry a cleanup baseline for reference, so the 45/42/1 verdict is only in the private audit. The 1024 SASS count is reported but the raw SASS is not committed. The full 44-shape harness (43 in the main session and the 128 holdout as an S3 recheck) and the raw per-round JSON are not public; the curated CSV is the redistributable evidence. The old recording script is stale and not the script used for the video. Each of these is a limit on what a reader can reproduce, and each is stated where it matters.</p>
+<p>I set the architecture and the invariants, reviewed the changes, ran every gate, and debugged these failures on the GPU. I can defend every mechanism here.</p>
+<h2 id="7-the-boundary-and-the-lessons">7. The boundary and the lessons</h2>
+<p>The artifact passed the gates. The gates are not the boundary.</p>
+<p>A private final audit found seven edge failures that the open set, the variants and the corpus do not exercise. They are the boundary of the proof, not a confession.</p>
+<div class="table-wrap"><table class="edge-failures">
+<thead>
+<tr>
+  <th>failure</th>
+  <th>what happens</th>
+  <th>why the proof does not cover it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>f16/f64 bare truthiness</td>
+  <td><code>Cond</code> or <code>where</code> on an <code>f16</code> or <code>f64</code> value emits <code>setp.neu.f32</code> on a <code>%h</code> or <code>%d</code> register; ptxas rejects the operand mismatch</td>
+  <td>the public tests cover f32 truthiness only</td>
+</tr>
+<tr>
+  <td>grouped shared <code>v4</code> from a 4-byte-aligned pool offset</td>
+  <td>a four-name shared load can be 16-byte misaligned because <code>_load_consecutive</code> does not check the declaration alignment</td>
+  <td><code>_plan_pairs</code> checks alignment, but the grouped path does not</td>
+</tr>
+<tr>
+  <td>divergent <code>Cond</code> containing <code>bar.sync</code></td>
+  <td>only the threads inside the predicate reach the barrier, so the block can hang</td>
+  <td>the partial-block guard catches a barrier under an over-provisioned launch, not a divergent barrier on an exact launch</td>
+</tr>
+<tr>
+  <td>16-byte <code>cp.async</code> with a 4-byte source offset</td>
+  <td>the compiler emits a 16-byte copy to a 4-byte-offset source; a local run reports a misaligned address at runtime</td>
+  <td>the reference IR uses 16-byte-aligned indices</td>
+</tr>
+<tr>
+  <td><code>TreeHalve</code> length above the block's warp count</td>
+  <td>slots above the active warps are uninitialized; the sum is wrong</td>
+  <td>the task schedules satisfy the length, and there is no length-versus-block check</td>
+</tr>
+<tr>
+  <td><code>WarpShuffle</code> length not a power of two</td>
+  <td>the emitter folds offset <code>length/2 ... 1</code> and ignores the missing lane; the result is wrong</td>
+  <td>no power-of-two check</td>
+</tr>
+<tr>
+  <td>scalar <code>bool</code> parameter</td>
+  <td>the signature emits <code>.param .pred</code>; ptxas rejects the parameter and the <code>ld.param.pred</code></td>
+  <td>numeric scalars are tested; bool is not</td>
+</tr>
+</tbody>
+</table></div>
+<p class="table-caption">Table 6. Seven constructs outside the tested envelope. The public README's &quot;fails loudly&quot; covers unknown constructs and malformed input; it does not list these seven silent failures in implemented constructs. A <code>CompileError</code> on a hidden problem still scores zero for that problem.</p>
+<p>Separately, the public coverage page lists the unimplemented constructs: the tensor-core and TMA star constructs, <code>Select</code>, <code>Pre</code>, <code>Carry</code>, <code>FuncCallExpr</code>, shared read swizzle, and f64 <code>max.NaN</code>/<code>min.NaN</code>. Those raise <code>CompileError</code>; the seven above are the silent failures in the implemented set.</p>
+<p>These failures are the next work, not a reason to distrust the 15 open problems. The open problems are a sample, and the sample is green. The boundary is what the sample does not cover.</p>
+<p>The lessons are tied to the stories:</p>
+<ol>
+<li><strong>Read the machine code.</strong> The 43x bug was invisible in the Python and obvious in SASS.</li>
+<li><strong>The launch is the contract.</strong> A guard is not defensive decoration; it is the correctness proof for over-provisioned launches.</li>
+<li><strong>Ownership is the architecture.</strong> Seeds belong to loop instances, shared bases belong to the prologue, and caches belong to a basic block.</li>
+<li><strong>Scheduling freedom is a primary constraint.</strong> A shorter kernel can be slower. Redundant loads can buy scheduling freedom.</li>
+<li><strong>Measure, interleave, reject.</strong> A single cold sample is not evidence. A negative result is data.</li>
+<li><strong>The last percent is often the scheduler.</strong> When the instruction mix matches and the gap remains, do not add a mechanism.</li>
+<li><strong>A public claim needs public evidence.</strong> Absolute medians, sample counts, session labels and a disclosed residual are stronger than a ratio with no column.</li>
+<li><strong>Strict inputs are a feature.</strong> A compiler that invents a launch is not being helpful; it is hiding a broken package.</li>
+</ol>
+<h3 id="what-i-would-do-next">What I would do next</h3>
+<p><em>This is an independent write-up, not part of the hackathon submission. The hackathon submission window is closed. The next steps are for the compiler as a standalone project.</em></p>
+<p>The next steps are concrete. Fix the dtype truthiness paths so an <code>f16</code> or <code>f64</code> condition emits a comparison on the right register class. Check the shared declaration alignment on the grouped <code>v4</code> path. Validate <code>TreeHalve</code> and <code>WarpShuffle</code> lengths against the block and the power-of-two requirement. Add an alignment proof or a scalar fallback for <code>cp.async</code>. Publish the reference column and the raw per-round JSON so the comparison verdict is reproducible from the public tree. Run the exact public commit on a clean GPU and archive the log. Test the edge cases the private final audit found before the broad cases: scalar parameters, over-provisioned collectives, partial warps, <code>f16</code>/<code>f64</code>, and multi-kernel chains.</p>
+<p>The compiler is in the repo, the tests are in the repo, the benchmark matrix is in the repo, and the one residual cell is in the matrix too. The interesting part is the distance between the original wrong answer and the last measured one.</p>
+
+    </article>
+    <section class="appendix">
+      <h2 id="evidence">Evidence</h2>
+<h3 id="public-artifact">Public artifact</h3>
+<p>The public artifact is commit <code>4018a9e</code> (tag <code>v1.0.0</code>, 200 files) at <code>https://github.com/titoatwork/emmy-ptx-compiler-submission</code>. The current README is <code>0420989</code>, the third README-only commit after the code release; <code>68bc29e</code> added the video link, <code>38e7e22</code> fixed it, and <code>0420989</code> corrected it. The tag remains at <code>4018a9e</code>. The public compiler files are byte-identical to the working commit <code>a446ef4</code>; I verified the SHA-256 of <code>compile.py</code> and the eight files under <code>ptxc/</code>.</p>
+<p>The public claims are in <code>README.md</code>, <code>DESIGN.md</code>, <code>docs/COVERAGE.md</code>, <code>docs/VERIFICATION.md</code>, <code>docs/BENCHMARKS.md</code>, <code>docs/OPTIMIZATION.md</code>, and <code>docs/benchmarks/final/matrix.csv</code>. The 88-cell matrix is the source for the absolute medians. The verification record is the source for the 92 tests, 46/46 variants, 86/86 corpus IRs in 85 packages, 147/147 local IRs, and 15/15 twice on the hosted runner. The public verification record labels the two 15/15 runs <code>v1.0.0</code>; they ran on the code-identical working revision <code>9b81f01</code> before the release commit was cut. The private audit compared the open-set PTX emitted by the public compiler with the PTX behind the logs and found it byte-identical. The exact tagged tree was not itself launched on the hosted runner.</p>
+<h3 id="file-references">File references</h3>
+<div class="table-wrap"><table class="file-refs">
+<thead>
+<tr>
+  <th>claim</th>
+  <th>public reference</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>one command, one IR path</td>
+  <td><code>compile.py:1-11</code></td>
+</tr>
+<tr>
+  <td>strict <code>meta.json</code> lookup and error</td>
+  <td><code>compile.py:35-67</code>, <code>compile.py:90-92</code></td>
+</tr>
+<tr>
+  <td><code>.maxntid</code> emission</td>
+  <td><code>ptxc/lower.py:627</code></td>
+</tr>
+<tr>
+  <td>Tile decode, guard and guard elision</td>
+  <td><code>ptxc/lower.py:736-825</code></td>
+</tr>
+<tr>
+  <td>flattened work id</td>
+  <td><code>ptxc/lower.py:828</code></td>
+</tr>
+<tr>
+  <td>cache selection and fill</td>
+  <td><code>ptxc/lower.py:134-260</code>, <code>ptxc/lower.py:328</code></td>
+</tr>
+<tr>
+  <td>shared bases in the prologue</td>
+  <td><code>ptxc/memory.py:51-72</code></td>
+</tr>
+<tr>
+  <td>accumulator ownership</td>
+  <td><code>ptxc/common.py:87-112</code>, <code>ptxc/stmts.py:1395-1406</code></td>
+</tr>
+<tr>
+  <td>warp shuffle</td>
+  <td><code>ptxc/stmts.py:1441-1492</code></td>
+</tr>
+<tr>
+  <td><code>cp.async</code> emission</td>
+  <td><code>ptxc/stmts.py:1600-1623</code></td>
+</tr>
+<tr>
+  <td>32-bit index arithmetic</td>
+  <td><code>ptxc/expr.py:501-530</code></td>
+</tr>
+<tr>
+  <td>32-bit remainder</td>
+  <td><code>ptxc/expr.py:687</code></td>
+</tr>
+<tr>
+  <td>dominating literal block</td>
+  <td><code>ptxc/emitter.py:32-43</code>, <code>ptxc/emitter.py:110-125</code></td>
+</tr>
+<tr>
+  <td>three invariants in prose</td>
+  <td><code>DESIGN.md:30-59</code></td>
+</tr>
+<tr>
+  <td>benchmark method and tables</td>
+  <td><code>docs/BENCHMARKS.md:15-26</code>, <code>docs/BENCHMARKS.md:28-125</code></td>
+</tr>
+<tr>
+  <td>measurement traps</td>
+  <td><code>docs/BENCHMARKS.md:171-179</code></td>
+</tr>
+<tr>
+  <td>accepted and rejected changes</td>
+  <td><code>docs/OPTIMIZATION.md:8-36</code></td>
+</tr>
+<tr>
+  <td>known coverage gaps</td>
+  <td><code>docs/COVERAGE.md:100-110</code></td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="working-record">Working record</h3>
+<p>The working history is not part of the public mirror. It has 166 commits across all refs, 55 on the main line, from 21 to 28 October 2026.</p>
+<p>The 43x fix is recorded in the working commit <code>045f51d</code> (&quot;32-bit index math, sharing, and loop unrolling: m01 14x faster&quot;). The commit message records the 64-bit remainder diagnosis and the out-of-line call four times per iteration; the experiment log records the <code>CALL.REL.NOINC $__cuda_sm20_rem_s64</code> mnemonic and the 6024 to 206 microsecond local RTX 3050 result. The commit subject's 14x is the runner improvement (584 to 41.6 on the hosted RTX 5090); the 43x is the ratio of the first local RTX 3050 measurement to the faster end of the reference range. The launch-bounds result is recorded in <code>dce3e99</code> (56 to 80 registers, 43.7 to 25.2 microseconds). The tile cache is <code>561fc4b</code>, the slice cache <code>e208bd5</code>, and the warp dot <code>e24b49c</code>. The working experiment log records the a01 49.8 to 25.2 tile-cache result and the a02 13.0 to 10.9 warp-dot result; the cache commit itself records 27.3 for a01, which is why the post reports all three.</p>
+<p>The 45/42/1 verdict is from the private audit, which recomputed it from a CSV with reference medians; the public CSV does not carry that column. The 1024 SASS count is 1268 on the hosted RTX 5090 (sm_120) and 1240 from ptxas 12.6 targeting sm_89; the local GPU is an RTX 3050 (sm_86). The raw SASS is not committed.</p>
+<h3 id="measurement-notes">Measurement notes</h3>
+<p>Warm is 10 warmup launches and 100 timed iterations. Cold is 0 warmup and 1 iteration. The warm noise rule is one 32 ns tick. The cold noise rule is overlapping ranges and medians within 1.5 percent. S1 is the main session; S2 and S3 are labeled rechecks. The runner has two clock states for short kernels; absolute numbers are not portable between sessions. The 88-cell CSV is the curated evidence; the full 44-shape harness (43 in the main session and the 128 holdout as an S3 recheck) and the raw per-round JSON are outside the public tree.</p>
+
+    </section>
+  </main>
+  <footer>
+    <p>written by titoatwork (<span class="proper-name">Ibteshamul Haque</span>).</p>
+  </footer>
+</div>
+<script>
+(function () {
+  var root = document.documentElement;
+  var toggle = document.getElementById("theme-toggle");
+  var progress = document.getElementById("progress");
+  var transitioning = false;
+
+  function label() {
+    toggle.textContent = root.dataset.theme === "dark" ? "light" : "dark";
+  }
+
+  function applyTheme(next) {
+    root.dataset.theme = next;
+    try { localStorage.setItem("theme", next); } catch (e) {}
+    label();
+  }
+
+  function setTheme(next, event) {
+    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!document.startViewTransition || reduce || transitioning) {
+      applyTheme(next);
+      return;
+    }
+    transitioning = true;
+    var transition = document.startViewTransition(function () {
+      applyTheme(next);
+    });
+    transition.finished.then(function () { transitioning = false; }, function () { transitioning = false; });
+    transition.ready.then(function () {
+      var rect = toggle.getBoundingClientRect();
+      var x = event && event.clientX ? event.clientX : rect.left + rect.width / 2;
+      var y = event && event.clientY ? event.clientY : rect.top + rect.height / 2;
+      var radius = Math.hypot(Math.max(x, window.innerWidth - x), Math.max(y, window.innerHeight - y));
+      document.documentElement.animate(
+        { clipPath: ["circle(0px at " + x + "px " + y + "px)", "circle(" + radius + "px at " + x + "px " + y + "px)"] },
+        { duration: 520, easing: "cubic-bezier(0.22, 1, 0.36, 1)", pseudoElement: "::view-transition-new(root)" }
+      );
+    }).catch(function () {});
+  }
+
+  toggle.addEventListener("click", function (event) {
+    setTheme(root.dataset.theme === "dark" ? "light" : "dark", event);
+  });
+
+  function updateProgress() {
+    var max = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+    var pct = max > 0 ? (document.documentElement.scrollTop / max) * 100 : 0;
+    progress.style.width = pct + "%";
+  }
+
+  document.addEventListener("scroll", updateProgress, { passive: true });
+  window.addEventListener("resize", updateProgress);
+  label();
+  updateProgress();
+})();
+</script>
+</body>
+</html>
